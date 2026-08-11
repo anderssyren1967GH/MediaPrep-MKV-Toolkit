@@ -1,4 +1,14 @@
-﻿## CPU/GPU-layout 0.11.51
+﻿# MediaPrep MKV Toolkit
+
+PowerShell toolkit for preparing, muxing, analyzing and encoding video files to MKV.
+
+## Latest release
+
+Current version: **0.11.51**
+
+Download the latest packaged release from the **Releases** section on GitHub.
+
+## CPU/GPU-layout 0.11.51
 
 Hotfix för WinForms-ankring: kontrollknapp, uppdateringsknapp, progressbar och högra detaljpanelen är vänsterankrade inom Videoencoder-gruppen så de inte flyttas utanför det synliga området när layouten expanderar.
 
