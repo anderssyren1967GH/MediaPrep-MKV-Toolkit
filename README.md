@@ -249,7 +249,19 @@ The current distribution includes Swedish and English language files.
 
 ## Installation
 
-### Option 1 — packaged GitHub release
+### Option 1 - PowerShell web installer
+
+The easiest way to install the latest MediaPrep MKV Toolkit release is with the PowerShell web installer.
+
+Open **Windows PowerShell** and run:
+
+```powershell
+$installer = "$env:TEMP\Install-MediaPrep-Web.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/main/Installer/Install-MediaPrep-Web.ps1" -OutFile $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+### Option 2 - Packaged GitHub release
 
 Download the packaged ZIP from the [Releases](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases) page.
 
@@ -263,7 +275,7 @@ The installer lets you select an installation folder and creates the MediaPrep d
 
 External FFmpeg and MKVToolNix binaries are not bundled with the installer.
 
-### Option 2 — portable use
+### Option 3 - Portable use
 
 Extract the packaged release to a folder and start:
 
