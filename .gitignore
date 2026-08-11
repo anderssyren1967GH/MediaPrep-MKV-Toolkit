@@ -1,0 +1,45 @@
+# MediaPrep MKV Toolkit
+
+# Runtime / generated data
+Data/Temp/
+Data/Statistics/
+Data/encoder-capabilities.json
+Data/encoder-benchmark.json
+Data/encoder-test-status.json
+Data/statistics-run-current.json
+Data/queue-dashboard-inventory.json
+Data/*diagnostic*.txt
+
+# User/runtime settings
+Data/config.json
+Data/mediaprep.preferences.json
+
+# Logs and reports
+Loggar/
+Rapporter/
+
+# Working media folders
+Processed/
+UnProcessed/
+Error/
+
+# Downloaded external tools
+Tools/FFmpeg/
+Tools/MKVToolNix/
+Tools/ToolBackups/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.old
+*.log
+
+# Windows / editors
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Local diagnostics
+Test-MediaPrep-*.ps1
