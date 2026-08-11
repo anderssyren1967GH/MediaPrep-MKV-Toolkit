@@ -1,57 +1,281 @@
-﻿# MediaPrep MKV Toolkit
+# MediaPrep MKV Toolkit
 
-PowerShell toolkit for preparing, muxing, analyzing and encoding video files to MKV.
+PowerShell toolkit for preparing, muxing, analyzing, organizing, and optionally re-encoding video files to MKV.
 
-## Latest release
+**Current release: 0.11.51**
 
-Current version: **0.11.51**
+[Download the latest packaged release](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases/latest)
 
-Download the latest packaged release from the **Releases** section on GitHub.
+> **License:** Source available for personal, non-commercial use. MediaPrep MKV Toolkit is not distributed under an OSI-approved open-source license. See [LICENSE.md](LICENSE.md).
 
-## CPU/GPU-layout 0.11.51
+## Overview
 
-Hotfix för WinForms-ankring: kontrollknapp, uppdateringsknapp, progressbar och högra detaljpanelen är vänsterankrade inom Videoencoder-gruppen så de inte flyttas utanför det synliga området när layouten expanderar.
+MediaPrep MKV Toolkit is a Windows PowerShell 5.1 workflow for processing video files into MKV. It can mux compatible source files without unnecessary video re-encoding, handle external subtitles, analyze media with FFprobe, optionally reduce file size using a verified HEVC encoder, process local or UNC/network queues, and keep runtime statistics.
 
-## CPU/GPU-layout 0.11.50
+The project intentionally remains PowerShell-based. There is no compiled application executable, which keeps the source readable and makes the workflow easier to inspect, maintain, and extend.
 
-CPU/GPU-fliken visar kontrollknapp, encoderöversikt och en separat detaljpanel med benchmark/capability-resultat. Processdiagnostiken i bannern visas i två kolumner.
+## Features
 
-## Verktygsversioner och processdiagnostik 0.11.49
+- Windows PowerShell 5.1 based Start Center and processing workflow
+- TS, MP4, AVI, MPG, and MPEG source support
+- MKV output
+- Subtitle handling for SRT and VTT
+- VTT-to-SRT conversion when required
+- Subtitle muxing without burn-in
+- FFprobe analysis before and after processing
+- Optional HEVC encoding
+- CPU encoding with `libx265`
+- NVIDIA HEVC NVENC support
+- Intel HEVC QSV support
+- AMD/Radeon HEVC AMF support when compatible hardware is present
+- Hardware detection and real encoder verification
+- Short 1080p encoder benchmark with speed and SSIM results
+- NVIDIA capability testing and VRAM/utilization information when available
+- Local processing and UNC/network queue processing
+- One UNC queue root processed completely before the next queue begins
+- Restart-safe queue handling
+- Error queue with review, continue, and remove actions
+- Live queue dashboard and runtime statistics
+- Copy-in and copy-back statistics
+- Slow-copy diagnostics
+- Queue save/load support
+- Archived session statistics
+- FFmpeg and MKVToolNix management
+- Online selection of recent FFmpeg and MKVToolNix versions
+- Local tool backup and rollback
+- Light, Dark, Monthly, and Custom interface themes
+- Swedish and English interface language files
 
-Bannern visar aktiv FFmpeg- och MKVToolNix-version samt namn/PID för Start Center och dess levande underprocesser. Det gör det lättare att se om exempelvis en köhost, FFmpeg eller annan MediaPrep-startad process fortfarande körs.
+## Requirements
 
-Under **Inställningar → Kontrollera / hämta externa verktyg** kan FFmpeg och MKVToolNix väljas online bland upp till de fem senaste tillgängliga stabila versionerna. Den befintliga aktiva versionen säkerhetskopieras alltid lokalt före byte. FFmpeg-versionen kompatibilitetstestas innan aktivering; efter ett FFmpeg-byte krävs ny CPU/GPU-kontroll.
+MediaPrep MKV Toolkit is intended for Windows and uses:
 
-CPU/GPU-kontrollknappen finns endast på fliken **CPU/GPU**.
+- Windows PowerShell 5.1
+- FFmpeg / FFprobe
+- MKVToolNix / `mkvmerge`
+- Optional compatible NVIDIA, Intel, or AMD GPU for hardware HEVC encoding
 
-## CPU/GPU och verifierad HEVC-encoder 0.11.46
+FFmpeg and MKVToolNix binaries are **not included in the repository**.
 
-Flikordningen är **Översikt | Val | CPU/GPU | Inställningar**. En ny installation väljer CPU/libx265 som standard, men MediaPrep tillåter inte att kön startas förrän en CPU/GPU-kontroll har genomförts. Kontrollen identifierar installerad hårdvara och kör verkliga korta HEVC-testkodningar. Endast encoderalternativ som klarat testet kan väljas.
+They can be verified, downloaded, updated, or changed from MediaPrep under:
 
-Stödda backend-kandidater är CPU `libx265`, NVIDIA `hevc_nvenc`, Intel (inklusive kompatibel Arc/iGPU) `hevc_qsv` och AMD/Radeon `hevc_amf`. Hårdvara som inte finns i datorn visas inte som valbar encoder. Flera verifierade alternativ kan växlas när kön är stoppad.
+**Settings → Check / download external tools**
 
-Benchmarken använder samma reproducerbara 1080p-testsekvens och visar hastighet, SSIM och teststorlek. NVIDIA-testet visar dessutom VRAM och belastningsdata när `nvidia-smi` kan läsa dem. VRAM är informationsvärde och kan inte allokeras manuellt från MediaPrep. Encoder-/capability-resultaten sparas under `Data` och blir automatiskt inaktuella när FFmpeg, GPU eller grafikdrivrutin ändras.
+MediaPrep stores the active external tools under:
 
-## Säker uppdatering och rollback av externa verktyg 0.11.43
+```text
+Tools\FFmpeg\ffmpeg.exe
+Tools\FFmpeg\ffprobe.exe
+Tools\MKVToolNix\mkvmerge.exe
+```
 
-Verktygshanteraren säkerhetskopierar en befintlig FFmpeg- eller MKVToolNix-installation till `Tools\ToolBackups` innan en ny version aktiveras. Ny FFmpeg byggs/stagas och kontrolleras innan den ersätter den aktiva versionen. Om aktiveringen misslyckas återställs föregående lokala version. Menyalternativet **Versioner/återställ** kan användas för att välja bland sparade lokala versioner. När FFmpeg ändras kräver MediaPrep en ny CPU/GPU-kontroll.
+Before replacing an active FFmpeg or MKVToolNix installation, MediaPrep keeps a local backup under `Tools\ToolBackups`.
 
-## Startläge, UAC och köpaket 0.11.41
+## Supported source formats
 
-MediaPrep startar normalt utan elevation. Endast det sparade valet att förhindra automatisk Windows Update-omstart under en kö kräver administratörsrättigheter. När valet aktiveras och sparas (med kön stoppad) sparas aktuell arbetslista och Start Center startas om via UAC. Spara/Öppna kö fungerar i både Kö och Allt i ett.
+MediaPrep currently handles:
 
+```text
+.ts
+.mp4
+.avi
+.mpg
+.mpeg
+```
 
-## Session, sparade köer och historisk statistik 0.11.39
+Output is written as MKV.
 
-- Sessionsklockan startar först när **Starta hela kön** verkligen startas och pausas när köprocessen avslutas/stoppas. Tom Start Center-tid räknas inte.
-- Alla UNC-köer som finns vid start registreras direkt i `statistics-run-current.json`; ytterligare köer kan läggas till senare under samma session.
-- Kömonitorn har **Ladda statistik...** för arkiverade `Data\Statistics\statistics-run-*.json` och **Aktuell** för att återgå till live-sessionen. Arkivläget visar även kvarvarande filer, fel och långsamma kopieringar från sessionsfilen.
-- Start Center har **Spara kö** och **Öppna kö**. Ett sparat ZIP-paket innehåller kölista samt relevanta runtime-JSON-filer och befintlig sessionsstatistik.
-- Vid uppstart upptäcks en kvarlämnad/ofärdig `statistics-run-current.json`. Användaren kan välja **Fortsätt**, **Spara till senare** eller **Ta bort**. Mediefiler och UNC-original raderas inte av detta val.
+MediaPrep uses FFprobe to inspect the source before processing so container, codec, resolution, frame rate, pixel format, duration, bitrate, and stream information can be evaluated before muxing or encoding.
 
-# MediaPrep MKV Toolkit 0.11.51
+## Subtitles
 
-## Kataloglayout från 0.11.38
+External subtitles can be matched with the source video.
+
+Supported subtitle formats:
+
+```text
+.srt
+.vtt
+```
+
+SRT is preferred when both formats are present.
+
+VTT subtitles can be converted to temporary SRT files before muxing. Subtitles are muxed into the MKV as selectable subtitle tracks; they are not burned into the video.
+
+MediaPrep can also create an MKV when no matching subtitle exists.
+
+## CPU/GPU encoder verification
+
+MediaPrep detects available CPU and GPU encoder candidates and verifies them with real short HEVC test encodes before they are considered usable.
+
+Supported backend candidates are:
+
+| Hardware | Backend | FFmpeg encoder |
+|---|---|---|
+| CPU | CPU | `libx265` |
+| NVIDIA GPU | NVENC | `hevc_nvenc` |
+| Intel GPU / compatible Intel Arc or iGPU | QSV | `hevc_qsv` |
+| AMD / Radeon GPU | AMF | `hevc_amf` |
+
+Hardware that is not present in the computer is not offered as an active encoder.
+
+The encoder test uses a reproducible 1920×1080, 30 fps test source and records benchmark information such as:
+
+- Encoding speed
+- SSIM
+- Output size
+- Verification result
+
+For NVIDIA hardware, MediaPrep can also record VRAM usage, GPU utilization, encoder utilization, and temperature when `nvidia-smi` is available.
+
+NVIDIA capability checks include:
+
+- CUDA decode
+- Preset P4
+- VBR / CQ
+- Spatial AQ
+- Temporal AQ
+- Lookahead 16
+- Surfaces 8
+- Multipass qres
+
+Capability and benchmark results are stored under `Data`. A new CPU/GPU verification is required when the relevant FFmpeg build, GPU, or graphics driver changes.
+
+## Queue processing
+
+MediaPrep supports both local processing and UNC/network queues.
+
+In Queue mode, each UNC queue root is completed before the next queue starts:
+
+```text
+Import
+  ↓
+Mux
+  ↓
+Analyze
+  ↓
+Optional HEVC encode
+  ↓
+Return to UNC
+  ↓
+Local cleanup
+  ↓
+Next queue
+```
+
+This design prevents MediaPrep from importing many independent network queues at once and unnecessarily filling the local work disk.
+
+Restart-safe queue logic can reuse complete local source files and avoid unnecessary re-copying when a valid processed MKV already exists.
+
+## Error handling
+
+Files that cannot be processed safely can be moved into the MediaPrep error queue while the remaining queue continues.
+
+The error queue supports:
+
+- **Review** — open the local MKV for inspection
+- **Continue** — return the item to the best safe processing stage
+- **Remove** — remove the item from the MediaPrep queue and clean only local working/temp files
+
+Removing an item from the MediaPrep error queue does not delete the original UNC source.
+
+An optional **Ignore decode errors** setting is available for files that need tolerant FFmpeg decoding.
+
+## Queue dashboard and statistics
+
+The Queue Dashboard can display live processing information and session statistics.
+
+MediaPrep tracks information such as:
+
+- Remaining files
+- Processed / total files
+- Remaining size
+- Files ready to return
+- Copy-in and copy-back activity
+- Average transfer speed
+- Slow-copy events
+- Current processing stage
+- Error queue items
+
+Session statistics can be archived under:
+
+```text
+Data\Statistics\
+```
+
+Saved historical sessions can be loaded in the dashboard without altering the current queue.
+
+MediaPrep can also save and reopen queue packages containing the queue list and relevant runtime state.
+
+## External tool management
+
+MediaPrep can manage FFmpeg and MKVToolNix from the Settings tab.
+
+The tool manager supports:
+
+- Checking installed versions
+- Downloading/updating tools
+- Selecting from recent available online versions
+- Testing a staged FFmpeg build before activation
+- Keeping local backups of replaced versions
+- Restoring a previous local version
+
+Changing FFmpeg invalidates the previous encoder verification so an incompatible capability result cannot silently be reused.
+
+The Start Center banner displays the active FFmpeg and MKVToolNix versions.
+
+## Process diagnostics
+
+The Start Center can display MediaPrep-started process names and process IDs (PIDs). This makes it easier to identify a remaining PowerShell, FFmpeg, MKVToolNix, queue-host, or related child process if a processing session is interrupted or the interface is closed unexpectedly.
+
+## Themes and language
+
+Available interface themes include:
+
+- Light
+- Dark
+- Monthly
+- Custom
+
+The Monthly theme selects an automatic palette based on the current month. Custom mode stores separate banner, panel/accent, and background colors.
+
+Language files are stored under:
+
+```text
+Languages\
+```
+
+The current distribution includes Swedish and English language files.
+
+## Installation
+
+### Option 1 — packaged GitHub release
+
+Download the packaged ZIP from the [Releases](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases) page.
+
+Extract the ZIP and run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\App\Install-MediaPrep.ps1
+```
+
+The installer lets you select an installation folder and creates the MediaPrep directory structure.
+
+External FFmpeg and MKVToolNix binaries are not bundled with the installer.
+
+### Option 2 — portable use
+
+Extract the packaged release to a folder and start:
+
+```text
+Start MediaPrep.cmd
+```
+
+Then configure or download the external tools from MediaPrep Settings.
+
+## Directory layout
+
+A normal installation uses the following structure:
 
 ```text
 MediaPrep MKV Toolkit\
@@ -70,8 +294,6 @@ MediaPrep MKV Toolkit\
 │  ├─ Manage-MediaPrepTools.ps1
 │  └─ Install-MediaPrep.ps1
 ├─ Data\
-│  ├─ config.json
-│  ├─ mediaprep.preferences.json
 │  ├─ Temp\
 │  ├─ Downloads\
 │  └─ Statistics\
@@ -82,148 +304,95 @@ MediaPrep MKV Toolkit\
 ├─ Processed\
 ├─ Rapporter\
 ├─ Tools\
+│  ├─ FFmpeg\
+│  ├─ MKVToolNix\
 │  └─ ToolBackups\
 └─ UnProcessed\
 ```
 
-Starta alltid programmet med `Start MediaPrep.cmd`. Vid första start efter uppgradering från äldre layout flyttas gamla PowerShell-skript i rotmappen till en säker backup under `Data\LegacyLayoutBackup_*`.
+Git does not track empty directories, so `.gitkeep` files are used where required in the repository.
 
-## Sessionsstatistik 0.11.38
-`Data\statistics-run-current.json` lever under hela tiden Start Center är öppet. Varje faktisk kopiering lagras som en separat copy-event, så återkörningar och nytillagda köer räknas korrekt i sessionens totala in-/utdata och MB/s. Dashboard-loggen skapas alltid för fel och varningar även när Verbose är avstängt.
+Runtime-generated data, logs, downloaded tools, media files, statistics, and local preferences are excluded from Git by `.gitignore`.
 
-Updated in 0.11.20: queue statistics are shown in a dedicated fixed dashboard box and stall diagnostics are clarified.
+## Default working folders
 
-Updated in 0.11.18: queue statistics remain visible in Queue mode, and verbose diagnostics now capture FFmpeg/NVENC/GPU details for troubleshooting.
-
-Updated in 0.11.17: queue statistics are always visible and update live while folders are scanned or queue items change.
-
-﻿## 0.11.15
-
-Start Center verifies every UNC queue folder before a run. If the elevated MediaPrep session lacks SMB access it prompts for credentials, connects in that elevated session, then verifies read/write/delete access. Queue mode shows four persistent statistics: remaining files, processed/total, remaining size and ready-to-return files.
-
-Updated in 0.11.14: queue statistics panel on Dashboard and improved cleanup of empty Processed folders.
-
-Updated in 0.11.12: live NVENC progress is shown in the blue PowerShell progress area and logged every five seconds.
-
-## Nytt i 0.11.11
-
-- NVENC-progress visas löpande i PowerShells progressruta och loggas var femte sekund.
-- Återkopiering till UNC visar kopierad mängd, procent och beräknad återstående tid.
-- Tomma lokala kömappar rensas efter lyckad bearbetning, även efter återstart.
-
-Updated in 0.11.8: restart-safe UNC imports avoid copying files again when a matching MKV already exists, reuse complete local sources, and reprocess interrupted items.
-
-Updated in 0.11.7: fixes PowerShell 5.1 path/program status validation.
-
-﻿Updated in 0.11.6: all configured folders and external programs now show a green check or red cross, with a unified Check paths / programs action.
-
-Updated in 0.11.5: fixes a StrictMode startup error in the Preferences tool status initialization.
-
-Updated in 0.11.4: Preferences layout refined, external tools heading moved to the left pane, and the right pane now focuses on language and tool controls.
-
-﻿# MediaPrep MKV Toolkit 0.11.0
-
-Created by Anders Syrén.
-
-MediaPrep MKV Toolkit is a Windows PowerShell 5.1 workflow for muxing TS/MP4/AVI/MPG/MPEG files to MKV, handling subtitles, analyzing media, optionally reducing file size with a verified CPU/NVIDIA/Intel/AMD HEVC encoder, processing UNC queues, and organizing completed media.
-
-**Source available for personal, non-commercial use.** See `LICENSE.md`.
-
-## PowerShell-first project
-
-The project intentionally remains PowerShell-based. There is no compiled application executable, which keeps the source readable and makes it easier for others to maintain or extend the project later.
-
-## Default folders
-
-- `UnProcessed` — local TS/MP4/AVI/MPG/MPEG files waiting to be processed
+- `UnProcessed` — local source files waiting to be processed
 - `Processed` — completed MKV files
-- `Data` — settings, indexes, manifests, and queue state
+- `Error` — local files requiring manual review
+- `Data` — settings, indexes, manifests, queue state, and runtime data
 - `Data\Temp` — temporary working files
-- `Data\Downloads` — reserved for future tool downloads
-- `Loggar` — logs
-- `Rapporter` — reports
-- `Languages` — `.local` language files
-- `Tools\FFmpeg` — reserved for a user-managed FFmpeg installation
-- `Tools\MKVToolNix` — reserved for a user-managed MKVToolNix installation
+- `Data\Downloads` — tool download/staging area
+- `Data\Statistics` — archived session statistics
+- `Loggar` — application and processing logs
+- `Rapporter` — generated reports
+- `Languages` — interface language files
+- `Tools\FFmpeg` — active FFmpeg/FFprobe installation
+- `Tools\MKVToolNix` — active MKVToolNix installation
+- `Tools\ToolBackups` — locally backed-up external tool versions
 
-All folders are included in GitHub/ZIP distributions. `.gitkeep` files are used because Git does not track empty directories.
+Existing installations that explicitly use the older `Filmer` folder remain supported. New installations use `UnProcessed`.
 
-Existing installations that explicitly use the older `Filmer` folder continue to work. New installations use `UnProcessed`.
+## Starting MediaPrep
 
-## Install from a downloaded GitHub release
-
-Extract the release and run:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\App\Install-MediaPrep.ps1
-```
-
-A folder picker lets the user choose the installation location. The installer copies the PowerShell source and creates the complete folder structure. It does not install FFmpeg or MKVToolNix binaries.
-
-## Portable use
-
-Extract the ZIP anywhere and start:
+Use:
 
 ```text
 Start MediaPrep.cmd
 ```
 
-Configure external tools under Preferences.
+as the normal entry point.
 
+MediaPrep normally starts without elevation. Administrator rights are requested only when needed, such as when the saved option to prevent automatic Windows Update restart during a queue requires elevation.
 
-## External tools
+## Updating
 
-The repository does not include FFmpeg or MKVToolNix binaries. Use **Preferences → Check / download external tools** to verify, download or update them. FFmpeg is obtained from a Windows build provider linked by the FFmpeg project; MKVToolNix is obtained from its project download site.
+For future versions:
 
+1. Download the new packaged release or update package.
+2. Stop any running MediaPrep queue.
+3. Apply the update according to the release notes.
+4. Start MediaPrep again.
+5. Re-run CPU/GPU verification if MediaPrep reports that the previous encoder capability profile is no longer valid.
 
-## Preferences fixes in 0.11.3
+See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-The executable file picker starts in the currently configured tool directory. The language selector remains visible at the bottom of Preferences.
+## Repository contents
 
+The GitHub repository contains the MediaPrep source, documentation, language files, and required empty-directory placeholders.
 
-## Externa verktyg
+It intentionally does **not** contain:
 
-Standardplaceringar:
+- User media
+- Runtime logs
+- Runtime statistics
+- Local configuration/preferences
+- FFmpeg binaries
+- MKVToolNix binaries
+- Tool backups
+- Temporary processing files
 
-```text
-Tools\FFmpeg\ffmpeg.exe
-Tools\FFmpeg\ffprobe.exe
-Tools\MKVToolNix\mkvmerge.exe
-```
+## License
 
-Språk och verktygshantering finns i högra delen av Preferences.
+Copyright © 2026 Anders Syrén. All rights reserved.
 
+MediaPrep MKV Toolkit is **source available for personal, non-commercial use**.
 
-## AVI-stöd i 0.11.26
-AVI-filer behandlas som övriga källfiler. MediaPrep kör ffprobe före muxning för att verifiera och dokumentera container, codecs, upplösning, FPS, pixel format, längd, bitrate och strömmar. Därefter muxas filen till MKV utan omkodning när det är möjligt och går vidare till den vanliga analysen och eventuell HEVC-omkodning med vald verifierad encoder.
+Commercial use, commercial redistribution, paid inclusion, and other uses restricted by the license require prior written permission from Anders Syrén.
 
+See [LICENSE.md](LICENSE.md) for the complete license terms.
 
-## Kömonitor och verbose-logg i 0.11.27
+This license is **not an OSI-approved open-source license**.
 
-Kömonitorn startas automatiskt när kön startas. Om **Verbose logging** är aktivt skrivs en separat dashboard-logg till `Loggar\MediaPrep-Queue-Dashboard_YYYY-MM-DD_HH-mm-ss.log` samt en launcher-logg för själva processstarten.
+## Third-party software
 
+MediaPrep can use third-party tools including FFmpeg and MKVToolNix. These projects are distributed under their own licenses and are not included under the MediaPrep MKV Toolkit license.
 
-## Fönsterhantering i 0.11.29
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-- Start Centers egna PowerShell-konsol döljs automatiskt.
-- Kömonitorns PowerShell-konsol döljs automatiskt.
-- Det detaljerade köfönstret startar dolt och kan växlas med **Visa detaljer / Dölj detaljer** i kömonitorn.
-- **Visa statistik** finns även i Inställningar under Programinställningar.
-- Verbose-loggning fortsätter till fil även när konsolfönstren är dolda.
+## Changelog
 
+Detailed release history is available in [CHANGELOG.md](CHANGELOG.md).
 
-## Manuella åtgärder i felkön (0.11.30)
+## Author
 
-I Kömonitor > Felkö kan en markerad post granskas, fortsättas eller tas bort. **Granska** öppnar lokal MKV. **Fortsätt** återställer posten till bästa säkra QueueStage och tar bort felmarkeringen. **Ta bort** tar bort posten ur MediaPrep-kön och rensar endast lokala arbets-/tempfiler; originalet på UNC lämnas orört.
-
-
-### Köisolering (0.11.35)
-I Kö-läge bearbetas varje UNC-mapp helt färdigt innan nästa köpost startar: import -> mux -> analys -> eventuell NVENC -> återflytt -> lokal städning. Skanning och analys filtreras till filer som hör till aktuell köpost.
-
-
-## Sessionsstatistik (0.11.35)
-`Data\statistics-run-current.json` skapas när Start Center startar och summerar alla köer/filer under hela den aktuella MediaPrep-sessionen. Filen arkiveras till `Data\Statistics` när Start Center stängs. Köstatusen ligger fortsatt i `queue-dashboard-inventory.json`.
-
-
-## Themes (0.11.42)
-Under **Inställningar** kan gränssnittstema väljas som Ljus, Mörk, Per månad eller Custom. Per månad använder en automatisk färgpalett baserad på aktuell månad. Custom använder tre sparade hex-färger för banner, panel/accent och bakgrund.
+Created by **Anders Syrén**.
