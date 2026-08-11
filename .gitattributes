@@ -1,0 +1,30 @@
+# MediaPrep MKV Toolkit
+# Normalize text files in Git and use appropriate line endings on checkout.
+
+* text=auto
+
+# Windows scripts
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Documentation / repository files
+*.md text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+
+# Language and configuration files
+*.local text eol=crlf
+*.json text eol=lf
+*.txt text eol=crlf
+
+# Binary/archive files must never be modified
+*.zip binary
+*.exe binary
+*.dll binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
