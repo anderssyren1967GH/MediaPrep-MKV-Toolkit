@@ -4,6 +4,7 @@
 [CmdletBinding()]
 param(
     [string]$Repository = 'anderssyren1967GH/MediaPrep-MKV-Toolkit',
+    [string]$InstallPath = '',
     [switch]$KeepDownloadedFiles
 )
 
@@ -23,6 +24,13 @@ function Stop-Installer {
     exit 1
 }
 
+function Test-Yes {
+    param([string]$Value)
+    return ($Value -match '^(?i:y|yes|j|ja)$')
+}
+
+Write-Host ''
+Write-Host 'MediaPrep MKV Toolkit - GitHub Web Installer' -ForegroundColor Cyan
 Write-Host ('PowerShell language mode: ' + [string]$ExecutionContext.SessionState.LanguageMode)
 
 $apiUrl = 'https://api.github.com/repos/' + $Repository + '/releases/latest'
@@ -99,7 +107,6 @@ try {
         Write-Step 'Verifying SHA-256'
         $expectedHash = $Matches[1]
         $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
-
         if ($actualHash -ne $expectedHash) {
             Stop-Installer ('SHA-256 verification failed. Expected: ' + $expectedHash + ' Actual: ' + $actualHash)
         }
@@ -109,24 +116,97 @@ try {
     Write-Step 'Extracting release package'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
-    $installer = Get-ChildItem -LiteralPath $extractPath -Filter 'Install-MediaPrep.ps1' -File -Recurse |
-        Where-Object { $_.FullName -match '[\\/]App[\\/]Install-MediaPrep\.ps1$' } |
+    $launcher = Get-ChildItem -LiteralPath $extractPath -Filter 'Start MediaPrep.cmd' -File -Recurse |
         Select-Object -First 1
 
-    if ($null -eq $installer) {
-        Stop-Installer 'The downloaded package does not contain App\Install-MediaPrep.ps1.'
+    if ($null -eq $launcher) {
+        Stop-Installer 'The downloaded package does not contain Start MediaPrep.cmd.'
     }
 
-    Write-Step ('Starting MediaPrep ' + $version + ' installer')
-    $args = '-NoProfile -ExecutionPolicy Bypass -File "' + $installer.FullName + '"'
-    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru
+    $packageRoot = $launcher.Directory.FullName
 
-    if ($process.ExitCode -ne 0) {
-        Stop-Installer ('The MediaPrep installer exited with code ' + [string]$process.ExitCode)
+    if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)) {
+        Stop-Installer 'The downloaded package does not contain App\MediaPrep-Start.ps1.'
+    }
+
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
+        $defaultPath = 'C:\MediaPrep MKV Toolkit'
+        Write-Host ''
+        Write-Host ('Install MediaPrep MKV Toolkit ' + $version) -ForegroundColor Cyan
+        Write-Host ('Default installation folder: ' + $defaultPath)
+        Write-Host 'Press Enter to use the default folder, or type another full path.'
+        $enteredPath = Read-Host 'Installation folder'
+        if ([string]::IsNullOrWhiteSpace($enteredPath)) {
+            $InstallPath = $defaultPath
+        }
+        else {
+            $InstallPath = $enteredPath
+        }
+    }
+
+    $InstallPath = $InstallPath -replace '^"(.*)"$','$1'
+
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
+        Stop-Installer 'No installation folder was selected.'
+    }
+
+    Write-Step ('Preparing installation folder: ' + $InstallPath)
+
+    if (Test-Path -LiteralPath $InstallPath) {
+        $existing = Get-ChildItem -LiteralPath $InstallPath -Force -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $existing) {
+            Write-Host ''
+            Write-Host 'The selected installation folder already contains files.' -ForegroundColor Yellow
+            Write-Host 'Existing user/runtime files will not be deleted.'
+            Write-Host 'Files from the release package with the same names will be replaced.'
+            $answer = Read-Host 'Continue? [Y/N]'
+            if (-not (Test-Yes $answer)) {
+                Stop-Installer 'Installation cancelled by user.'
+            }
+        }
+    }
+    else {
+        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
+    }
+
+    $writeTest = Join-Path $InstallPath '.mediaprep-install-write-test.tmp'
+    try {
+        Set-Content -LiteralPath $writeTest -Value 'MediaPrep write test' -Encoding ASCII
+        Remove-Item -LiteralPath $writeTest -Force
+    }
+    catch {
+        Stop-Installer ('The installation folder is not writable: ' + $InstallPath + '. Try another folder or run PowerShell as administrator.')
+    }
+
+    Write-Step ('Installing MediaPrep ' + $version)
+
+    Get-ChildItem -LiteralPath $packageRoot -Force | ForEach-Object {
+        $destination = Join-Path $InstallPath $_.Name
+        Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+    }
+
+    $installedLauncher = Join-Path $InstallPath 'Start MediaPrep.cmd'
+    $installedStartCenter = Join-Path $InstallPath 'App\MediaPrep-Start.ps1'
+
+    if (-not (Test-Path -LiteralPath $installedLauncher -PathType Leaf)) {
+        Stop-Installer 'Installation verification failed: Start MediaPrep.cmd is missing.'
+    }
+
+    if (-not (Test-Path -LiteralPath $installedStartCenter -PathType Leaf)) {
+        Stop-Installer 'Installation verification failed: App\MediaPrep-Start.ps1 is missing.'
     }
 
     Write-Host ''
-    Write-Host ('MediaPrep ' + $version + ' installer completed.') -ForegroundColor Green
+    Write-Host '============================================================' -ForegroundColor Green
+    Write-Host ('MediaPrep MKV Toolkit ' + $version + ' installed successfully.') -ForegroundColor Green
+    Write-Host ('Installation folder: ' + $InstallPath) -ForegroundColor Green
+    Write-Host '============================================================' -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'Start MediaPrep with:' -ForegroundColor Cyan
+    Write-Host ('"' + $installedLauncher + '"')
+    Write-Host ''
+    Write-Host 'FFmpeg and MKVToolNix can be installed from MediaPrep Settings.'
 }
 catch {
     Write-Host ''
@@ -136,6 +216,7 @@ catch {
 }
 finally {
     if ($KeepDownloadedFiles) {
+        Write-Host ''
         Write-Host ('Downloaded files kept at: ' + $tempRoot)
     }
     else {
