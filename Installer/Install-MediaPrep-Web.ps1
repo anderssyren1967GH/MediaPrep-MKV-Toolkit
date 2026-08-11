@@ -1,11 +1,13 @@
 ﻿# MediaPrep MKV Toolkit - GitHub Web Installer
 # Windows PowerShell 5.1 compatible, including ConstrainedLanguage environments.
+# Non-interactive: suitable for PowerShell console, PowerShell ISE and future package managers.
 
 [CmdletBinding()]
 param(
     [string]$Repository = 'anderssyren1967GH/MediaPrep-MKV-Toolkit',
-    [string]$InstallPath = '',
-    [switch]$KeepDownloadedFiles
+    [string]$InstallPath = 'C:\MediaPrep MKV Toolkit',
+    [switch]$KeepDownloadedFiles,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,14 +26,10 @@ function Stop-Installer {
     exit 1
 }
 
-function Test-Yes {
-    param([string]$Value)
-    return ($Value -match '^(?i:y|yes|j|ja)$')
-}
-
 Write-Host ''
 Write-Host 'MediaPrep MKV Toolkit - GitHub Web Installer' -ForegroundColor Cyan
 Write-Host ('PowerShell language mode: ' + [string]$ExecutionContext.SessionState.LanguageMode)
+Write-Host ('Installation folder: ' + $InstallPath)
 
 $apiUrl = 'https://api.github.com/repos/' + $Repository + '/releases/latest'
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -41,6 +39,12 @@ $zipPath = Join-Path $tempRoot 'MediaPrep-latest.zip'
 $extractPath = Join-Path $tempRoot 'Extracted'
 
 try {
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
+        Stop-Installer 'InstallPath cannot be empty.'
+    }
+
+    $InstallPath = $InstallPath -replace '^"(.*)"$','$1'
+
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
@@ -84,8 +88,7 @@ try {
     }
 
     if ($null -eq $asset) {
-        $available = @($release.assets | ForEach-Object { [string]$_.name }) -join ', '
-        Stop-Installer ('No packaged MediaPrep ZIP was found in release ' + $tag + '. Available assets: ' + $available)
+        Stop-Installer ('No packaged MediaPrep ZIP was found in release ' + $tag + '.')
     }
 
     Write-Step ('Downloading ' + [string]$asset.name)
@@ -129,45 +132,21 @@ try {
         Stop-Installer 'The downloaded package does not contain App\MediaPrep-Start.ps1.'
     }
 
-    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
-        $defaultPath = 'C:\MediaPrep MKV Toolkit'
-        Write-Host ''
-        Write-Host ('Install MediaPrep MKV Toolkit ' + $version) -ForegroundColor Cyan
-        Write-Host ('Default installation folder: ' + $defaultPath)
-        Write-Host 'Press Enter to use the default folder, or type another full path.'
-        $enteredPath = Read-Host 'Installation folder'
-        if ([string]::IsNullOrWhiteSpace($enteredPath)) {
-            $InstallPath = $defaultPath
-        }
-        else {
-            $InstallPath = $enteredPath
-        }
-    }
-
-    $InstallPath = $InstallPath -replace '^"(.*)"$','$1'
-
-    if ([string]::IsNullOrWhiteSpace($InstallPath)) {
-        Stop-Installer 'No installation folder was selected.'
-    }
-
     Write-Step ('Preparing installation folder: ' + $InstallPath)
 
-    if (Test-Path -LiteralPath $InstallPath) {
-        $existing = Get-ChildItem -LiteralPath $InstallPath -Force -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($null -ne $existing) {
-            Write-Host ''
-            Write-Host 'The selected installation folder already contains files.' -ForegroundColor Yellow
-            Write-Host 'Existing user/runtime files will not be deleted.'
-            Write-Host 'Files from the release package with the same names will be replaced.'
-            $answer = Read-Host 'Continue? [Y/N]'
-            if (-not (Test-Yes $answer)) {
-                Stop-Installer 'Installation cancelled by user.'
-            }
-        }
+    if (-not (Test-Path -LiteralPath $InstallPath)) {
+        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
     }
     else {
-        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
+        $existing = Get-ChildItem -LiteralPath $InstallPath -Force -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+        if ($null -ne $existing -and -not $Force) {
+            Stop-Installer (
+                'The installation folder already contains files: ' + $InstallPath +
+                '. Re-run with -Force to update/overwrite program files without deleting unrelated files.'
+            )
+        }
     }
 
     $writeTest = Join-Path $InstallPath '.mediaprep-install-write-test.tmp'
@@ -176,7 +155,10 @@ try {
         Remove-Item -LiteralPath $writeTest -Force
     }
     catch {
-        Stop-Installer ('The installation folder is not writable: ' + $InstallPath + '. Try another folder or run PowerShell as administrator.')
+        Stop-Installer (
+            'The installation folder is not writable: ' + $InstallPath +
+            '. Choose another folder or run PowerShell as administrator.'
+        )
     }
 
     Write-Step ('Installing MediaPrep ' + $version)
