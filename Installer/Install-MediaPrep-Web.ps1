@@ -1,6 +1,5 @@
 ﻿# MediaPrep MKV Toolkit - GitHub Web Installer
-# Downloads the latest packaged GitHub release and starts the bundled installer.
-# Windows PowerShell 5.1 compatible.
+# Windows PowerShell 5.1 compatible, including ConstrainedLanguage environments.
 
 [CmdletBinding()]
 param(
@@ -16,19 +15,20 @@ function Write-Step {
     Write-Host ('==> ' + $Message) -ForegroundColor Cyan
 }
 
-function Fail {
+function Stop-Installer {
     param([string]$Message)
-    throw $Message
+    Write-Host ''
+    Write-Host 'MediaPrep web installation failed.' -ForegroundColor Red
+    Write-Host $Message -ForegroundColor Red
+    exit 1
 }
 
-# GitHub requires modern TLS. Explicitly enable TLS 1.2 for Windows PowerShell 5.1.
-try {
-    [Net.ServicePointManager]::SecurityProtocol =
-        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-} catch {}
+Write-Host ('PowerShell language mode: ' + [string]$ExecutionContext.SessionState.LanguageMode)
 
-$apiUrl = "https://api.github.com/repos/$Repository/releases/latest"
-$tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('MediaPrep-WebInstall_' + [guid]::NewGuid().ToString('N'))
+$apiUrl = 'https://api.github.com/repos/' + $Repository + '/releases/latest'
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$random = Get-Random -Minimum 1000 -Maximum 999999
+$tempRoot = Join-Path $env:TEMP ('MediaPrep-WebInstall_' + $stamp + '_' + $random)
 $zipPath = Join-Path $tempRoot 'MediaPrep-latest.zip'
 $extractPath = Join-Path $tempRoot 'Extracted'
 
@@ -36,121 +36,111 @@ try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
-    Write-Step "Checking the latest MediaPrep release on GitHub"
+    Write-Step 'Checking the latest MediaPrep release on GitHub'
 
     $headers = @{
-        'Accept'     = 'application/vnd.github+json'
+        Accept = 'application/vnd.github+json'
         'User-Agent' = 'MediaPrep-WebInstaller'
     }
 
     $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -UseBasicParsing
+    if ($null -eq $release) { Stop-Installer 'GitHub did not return a release.' }
 
-    if ($null -eq $release -or [string]::IsNullOrWhiteSpace([string]$release.tag_name)) {
-        Fail 'GitHub did not return a valid published release.'
+    $tag = [string]$release.tag_name
+    if ([string]::IsNullOrWhiteSpace($tag)) { Stop-Installer 'GitHub did not return a valid release tag.' }
+
+    $version = $tag
+    if ($version -match '^[vV](.+)$') { $version = $Matches[1] }
+
+    Write-Host ('Latest release: ' + $tag)
+
+    $expectedName = 'MediaPrep-MKV-Toolkit-' + $version + '.zip'
+    $asset = $null
+
+    foreach ($candidate in @($release.assets)) {
+        if ([string]$candidate.name -eq $expectedName) {
+            $asset = $candidate
+            break
+        }
     }
 
-    $version = ([string]$release.tag_name).TrimStart('v','V')
-    Write-Host ("Latest release: {0}" -f $release.tag_name)
-
-    # Select the packaged MediaPrep ZIP uploaded as a release asset.
-    # Deliberately exclude update ZIPs and GitHub-generated source archives.
-    $expectedName = "MediaPrep-MKV-Toolkit-$version.zip"
-    $asset = @($release.assets | Where-Object {
-        [string]$_.name -eq $expectedName
-    }) | Select-Object -First 1
-
     if ($null -eq $asset) {
-        # Fallback for future naming variations, while still excluding update packages.
-        $asset = @($release.assets | Where-Object {
-            ([string]$_.name -match '^MediaPrep-MKV-Toolkit-[0-9]+\.[0-9]+\.[0-9]+\.zip$') -and
-            ([string]$_.name -notmatch 'uppdatering|update')
-        }) | Select-Object -First 1
+        foreach ($candidate in @($release.assets)) {
+            $name = [string]$candidate.name
+            if ($name -match '^MediaPrep-MKV-Toolkit-[0-9]+\.[0-9]+\.[0-9]+\.zip$' -and
+                $name -notmatch 'uppdatering|update') {
+                $asset = $candidate
+                break
+            }
+        }
     }
 
     if ($null -eq $asset) {
         $available = @($release.assets | ForEach-Object { [string]$_.name }) -join ', '
-        Fail ("No packaged MediaPrep ZIP was found in release {0}. Available assets: {1}" -f $release.tag_name,$available)
+        Stop-Installer ('No packaged MediaPrep ZIP was found in release ' + $tag + '. Available assets: ' + $available)
     }
 
-    Write-Step ("Downloading {0}" -f $asset.name)
+    Write-Step ('Downloading ' + [string]$asset.name)
     Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -OutFile $zipPath -UseBasicParsing
 
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
-        Fail 'The release ZIP was not downloaded.'
+        Stop-Installer 'The release ZIP was not downloaded.'
     }
 
     $downloaded = Get-Item -LiteralPath $zipPath
     if ($downloaded.Length -le 0) {
-        Fail 'The downloaded release ZIP is empty.'
+        Stop-Installer 'The downloaded release ZIP is empty.'
     }
 
-    Write-Host ("Downloaded: {0:N1} MB" -f ($downloaded.Length / 1MB))
+    Write-Host ('Downloaded bytes: ' + [string]$downloaded.Length)
 
-    # GitHub release assets may expose a SHA-256 digest.
     $digestText = [string]$asset.digest
-    if (-not [string]::IsNullOrWhiteSpace($digestText) -and $digestText -match '^sha256:([0-9a-fA-F]{64})$') {
+    if ($digestText -match '^sha256:([0-9a-fA-F]{64})$') {
         Write-Step 'Verifying SHA-256'
-        $expectedHash = $Matches[1].ToUpperInvariant()
-        $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToUpperInvariant()
+        $expectedHash = $Matches[1]
+        $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
 
         if ($actualHash -ne $expectedHash) {
-            Fail ("SHA-256 verification failed.`r`nExpected: {0}`r`nActual:   {1}" -f $expectedHash,$actualHash)
+            Stop-Installer ('SHA-256 verification failed. Expected: ' + $expectedHash + ' Actual: ' + $actualHash)
         }
-
         Write-Host 'SHA-256: OK' -ForegroundColor Green
-    }
-    else {
-        Write-Host 'GitHub did not provide a SHA-256 digest for this asset; continuing without digest verification.' -ForegroundColor Yellow
     }
 
     Write-Step 'Extracting release package'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
-    # The release package normally contains one versioned top-level folder.
-    # Locate the bundled installer instead of depending on that folder name.
     $installer = Get-ChildItem -LiteralPath $extractPath -Filter 'Install-MediaPrep.ps1' -File -Recurse |
         Where-Object { $_.FullName -match '[\\/]App[\\/]Install-MediaPrep\.ps1$' } |
         Select-Object -First 1
 
     if ($null -eq $installer) {
-        Fail 'The downloaded package does not contain App\Install-MediaPrep.ps1.'
+        Stop-Installer 'The downloaded package does not contain App\Install-MediaPrep.ps1.'
     }
 
-    Write-Step ("Starting MediaPrep {0} installer" -f $version)
-    Write-Host ("Installer: {0}" -f $installer.FullName)
-    Write-Host ''
-
-    $process = Start-Process -FilePath 'powershell.exe' `
-        -ArgumentList @(
-            '-NoProfile',
-            '-ExecutionPolicy', 'Bypass',
-            '-File', ('"{0}"' -f $installer.FullName)
-        ) `
-        -Wait -PassThru
+    Write-Step ('Starting MediaPrep ' + $version + ' installer')
+    $args = '-NoProfile -ExecutionPolicy Bypass -File "' + $installer.FullName + '"'
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -Wait -PassThru
 
     if ($process.ExitCode -ne 0) {
-        Fail ("The MediaPrep installer exited with code {0}." -f $process.ExitCode)
+        Stop-Installer ('The MediaPrep installer exited with code ' + [string]$process.ExitCode)
     }
 
     Write-Host ''
-    Write-Host ("MediaPrep {0} installer completed." -f $version) -ForegroundColor Green
+    Write-Host ('MediaPrep ' + $version + ' installer completed.') -ForegroundColor Green
 }
 catch {
     Write-Host ''
     Write-Host 'MediaPrep web installation failed.' -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host $_ -ForegroundColor Red
     exit 1
 }
 finally {
     if ($KeepDownloadedFiles) {
-        Write-Host ''
-        Write-Host ("Downloaded files kept at: {0}" -f $tempRoot)
+        Write-Host ('Downloaded files kept at: ' + $tempRoot)
     }
     else {
-        try {
-            if (Test-Path -LiteralPath $tempRoot) {
-                Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        } catch {}
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
