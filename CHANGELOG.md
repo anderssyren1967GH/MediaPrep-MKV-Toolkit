@@ -1,351 +1,367 @@
-﻿## 0.11.51 - 2026-08-11
+## 0.11.52 - 2026-08-12
 
-- CPU/GPU-layout: rättar WinForms-ankring som flyttade Kontrollera CPU/GPU, Uppdatera maskinvara, progressbaren och detaljpanelen långt utanför den synliga delen när containern ändrade storlek.
-- De berörda kontrollerna är nu vänsterankrade och behåller sina avsedda positioner: kontrollknapp X=682, uppdateringsknapp X=900 och detaljpanel X=682.
-- Ingen ändring i encoder-test, capability-cache, benchmark, kömotor, muxning, omkodning, UNC-flöde eller statistik.
+- Added MediaPrep self-update/version management through GitHub Releases. Up to five recent published MediaPrep versions can be listed and selected, including deliberate downgrade to an older published version.
+- MediaPrep program files are backed up under `Data\ProgramBackups` before update/restore. A separate updater process applies program files after Start Center closes, preserves user/runtime data, restarts MediaPrep, and attempts automatic rollback on activation failure.
+- Existing FFmpeg and MKVToolNix online version selection/rollback remains available alongside MediaPrep version management.
+- Added a non-interactive GitHub PowerShell web installer under `Installer\Install-MediaPrep-Web.ps1`, with `-InstallPath`, `-Force`, GitHub release discovery, SHA-256 verification when available, and ConstrainedLanguage-aware messaging.
+- `Start MediaPrep.cmd` and the error-queue CMD launcher are stored without UTF-8 BOM so `cmd.exe` does not interpret BOM bytes as part of `@echo off`.
+- Start Center now detects PowerShell ConstrainedLanguage before loading WinForms and shows a clear policy message before exiting.
+- The interactive ZIP installer also detects ConstrainedLanguage before loading WinForms and points managed users to the web installer/policy requirement instead of failing with a type error.
+- CPU/GPU verification now checks FFmpeg, FFprobe, and MKVToolNix first and directs the user to Settings → External tools when they are missing.
+- Encoder failures are translated into clearer driver guidance. NVIDIA NVENC API/driver mismatches report the required driver/API when FFmpeg supplies them; Intel QSV and AMD AMF driver/device failures also get targeted guidance.
+- Added independent source-format checkboxes on Options: TS, MP4, AVI, MPG, MPEG, and MKV. The first five are enabled by default; MKV is opt-in. A queue cannot start if no format is selected.
+- MKV can now be selected as an input format. Selected MKV sources skip remuxing, go directly to analysis/optional HEVC encoding, and use verification/restart-safe staging before the source is removed.
+- UNC MKV sources are handled safely when the source and final output have the same path: the verified result replaces the original atomically when deletion is enabled; with deletion disabled the original is preserved and the result is published as `name.mediaprep.mkv`.
+- The working CPU/GPU layout fix from 0.11.51 is preserved unchanged.
+
+## 0.11.51 - 2026-08-11
+
+- CPU/GPU layout: fixed WinForms anchoring that moved Check CPU/GPU, Refresh hardware, the progress bar, and the details panel far outside the visible area when the container changed size.
+- The affected controls are now left-anchored and retain their intended positions: check button X=682, refresh button X=900, and details panel X=682.
+- No changes to encoder testing, capability cache, benchmarks, queue engine, muxing, encoding, UNC flow, or statistics.
 
 ## 0.11.50 - 2026-08-11
 
-- CPU/GPU: kontrollknappen görs explicit synlig och ligger endast på CPU/GPU-fliken.
-- CPU/GPU: detaljpanelen är nu en egen GroupBox som alltid visar benchmark och capability-resultat för vald eller aktuell testad encoder.
-- Banner: MediaPrep-processer visas i två kolumner med namn och PID för bättre läsbarhet.
+- CPU/GPU: the check button is explicitly visible and exists only on the CPU/GPU tab.
+- CPU/GPU: the details panel is now a dedicated GroupBox that always displays benchmark and capability results for the selected or currently tested encoder.
+- Banner: MediaPrep processes are displayed in two columns with name and PID for improved readability.
 
-# MediaPrep MKV Toolkit changelog
+# MediaPrep MKV Toolkit Changelog
 
 ## 0.11.49 - 2026-08-11
-- CPU/GPU-kontrollen finns nu endast på fliken **CPU/GPU**. Den globala kontrollknappen i Start Centers nederkant är borttagen.
-- Bannern visar installerad **FFmpeg-version** och **MKVToolNix-version**.
-- Bannern visar löpande namn och PID för Start Center-processen och alla levande underprocesser som startats från den, t.ex. PowerShell, FFmpeg, ffprobe och mkvmerge. Processlistan uppdateras ungefär var femte sekund.
-- Verktygshanteraren kan nu hämta och välja bland de fem senaste tillgängliga stabila FFmpeg-versionerna online. Vald version stagras och kompatibilitetstestas innan den aktiveras.
-- Verktygshanteraren kan välja bland de fem senaste MKVToolNix-versionerna online.
-- Befintlig lokal rollback är kvar: den aktiva versionen säkerhetskopieras före byte, så en tidigare fungerande FFmpeg/MKVToolNix kan återställas även efter att en annan onlineversion installerats.
-- **A / alla** installerar den senaste versionen av båda verktygen; **F** respektive **M** öppnar versionsvalet.
-- Byte av FFmpeg ogiltigförklarar fortsatt CPU/GPU-kontrollen så encoders verifieras på nytt mot den valda FFmpeg-versionen.
-- Ingen ändring i köisolering, muxning, analys, omkodningsalgoritm, felkö, sessionsstatistik eller UNC-återflyttning.
+- The CPU/GPU check is now available only on the **CPU/GPU** tab. The global check button at the bottom of Start Center has been removed.
+- The banner displays the installed **FFmpeg version** and **MKVToolNix version**.
+- The banner continuously displays the name and PID of the Start Center process and all active child processes started from it, such as PowerShell, FFmpeg, ffprobe, and mkvmerge. The process list is refreshed approximately every five seconds.
+- The tool manager can now retrieve and select from the five most recent available stable FFmpeg versions online. The selected version is staged and compatibility-tested before activation.
+- The tool manager can select from the five most recent MKVToolNix versions online.
+- Existing local rollback is retained: the active version is backed up before replacement, allowing a previously working FFmpeg/MKVToolNix version to be restored even after another online version has been installed.
+- **A / all** installs the latest version of both tools; **F** and **M** open the respective version selectors.
+- Changing FFmpeg continues to invalidate the CPU/GPU verification so encoders are reverified against the selected FFmpeg version.
+- No changes to queue isolation, muxing, analysis, encoding algorithm, error queue, session statistics, or UNC return handling.
 
 ## 0.11.45 - 2026-08-11
-- CPU/GPU-fliken visar nu även identifierade NVIDIA-, Intel- och AMD-encoderkandidater **före** första kontrollen. De markeras tydligt som `Ej kontrollerad`; de blir inte godkända eller sparade som aktiv encoder förrän det verkliga benchmark-/capability-testet har klarats.
-- När en köstart blockeras därför att CPU/GPU ännu inte kontrollerats växlar Start Center till CPU/GPU-fliken och sätter fokus på **Kontrollera alla encoders**.
-- Start Center har fast fönsterstorlek och kan inte längre dras ihop så att CPU/GPU-knappar, flikar eller nederkantens kontroller hamnar utanför den synliga layouten. Vanlig minimering till aktivitetsfältet är fortfarande möjlig.
-- Encoder-, kö-, mux-, analys-, statistik-, tema-, UAC- och verktygshanteringslogik är i övrigt oförändrad.
+- The CPU/GPU tab now also displays detected NVIDIA, Intel, and AMD encoder candidates **before** the first check. They are clearly marked as `Not checked`; they are not approved or stored as the active encoder until the actual benchmark/capability test succeeds.
+- When queue startup is blocked because CPU/GPU has not yet been checked, Start Center switches to the CPU/GPU tab and focuses **Check all encoders**.
+- Start Center now has a fixed window size and can no longer be resized so small that CPU/GPU buttons, tabs, or bottom controls fall outside the visible layout. Normal minimization to the taskbar remains available.
+- Encoder, queue, mux, analysis, statistics, theme, UAC, and tool-management logic is otherwise unchanged.
 
 ## 0.11.44 - 2026-08-11
-- Hotfix: Start Center kunde inte öppnas på grund av felaktig användning av PowerShells `-f`-operator i CPU/GPU-flikens text för fysiska kärnor/logiska processorer.
-- CPU-raden formateras nu innan den skickas till `List.Add()`, så hårdvarusammanfattningen inte kan ge `FormatError` vid uppstart.
-- Ingen kö-, mux-, analys-, NVENC/QSV/AMF-, statistik-, UAC-, tema- eller verktygshanteringslogik har ändrats i denna hotfix.
+- Hotfix: Start Center could not open because of incorrect use of PowerShell's `-f` operator in the CPU/GPU tab text for physical cores/logical processors.
+- The CPU row is now formatted before being passed to `List.Add()`, preventing the hardware summary from producing a `FormatError` during startup.
+- No queue, mux, analysis, NVENC/QSV/AMF, statistics, UAC, theme, or tool-management logic was changed in this hotfix.
 
 ## 0.11.43 - 2026-08-11
-- Ny flik **CPU/GPU** mellan Val och Inställningar. Den visar upptäckt CPU/GPU, drivrutiner, verifierade HEVC-encoders och benchmarkresultat.
-- Första installationen väljer CPU/libx265 som standard. En riktig CPU/GPU-kontroll måste genomföras innan en kö får starta.
-- Encoder-kontrollen kör reproducerbara 1080p-testkodningar och verifierar endast de backends som både finns i FFmpeg och på installerad hårdvara: CPU/libx265, NVIDIA/hevc_nvenc, Intel/hevc_qsv och AMD/hevc_amf.
-- Flera verifierade encoderalternativ kan väljas i dropdown när kön är stoppad. Encoder kan inte bytas medan en kö arbetar.
-- Benchmark visar hastighet, SSIM och teststorlek. För NVIDIA mäts dessutom VRAM före/max/ökning, GPU-/encoderbelastning och temperatur när `nvidia-smi` finns. VRAM visas endast som diagnostik och är inte användarstyrt.
-- NVIDIA capability-test provar bland annat CUDA decode, preset P4, VBR/CQ, Spatial AQ, Temporal AQ, lookahead, surfaces och multipass. Funktioner som inte klarar det verkliga testet markeras som ej stödda. Huvudkodningen behåller den konservativa/stabila NVENC-profilen och aktiverar inte nya extrafunktioner automatiskt.
-- Encoder-resultat sparas i `Data\encoder-capabilities.json` och `Data\encoder-benchmark.json`. Kontrollresultatet blir inaktuellt om FFmpeg-version, GPU-lista eller grafikdrivrutin ändras.
-- Bannern visar vald encoder dynamiskt, t.ex. CPU HEVC, NVIDIA HEVC NVENC, Intel HEVC QSV eller AMD HEVC AMF.
-- FFmpeg- och MKVToolNix-uppdateringar säkerhetskopierar nu den aktiva versionen under `Tools\ToolBackups`. Verktygshanteraren har **Versioner/återställ** och kan återställa en tidigare lokal version om en uppdatering orsakar problem.
-- FFmpeg uppdateras i staging och verifieras innan aktivering. Misslyckad aktivering återställer föregående version automatiskt. Byte av FFmpeg ogiltigförklarar CPU/GPU-kontrollen.
-- Custom-temats tre hex-fält har kompakta live-färgprover bredvid respektive värde. Färgprovet ändras direkt när ett giltigt `#RRGGBB` skrivs. Sparade Custom-färger startar om Start Center när kön är stoppad så temat appliceras direkt.
-- Gröna/röda sökvägs- och programstatusmarkeringar återställs efter temaläggning så statusfärgerna behåller sin semantiska betydelse.
-- Tema-/språkomstarten går genom ordinarie UAC-startlogik, så ett sparat Windows Update-skydd tappar inte elevation efter ett temabyte.
-- Arbetskö, köisolering, felkö, sessionsstatistik, sparade köpaket, UAC/Windows Update-skydd, filformat och dashboard har lämnats orörda utöver att vald encoder förs genom jobbfilen.
+- Added a new **CPU/GPU** tab between Options and Settings. It displays detected CPU/GPU hardware, drivers, verified HEVC encoders, and benchmark results.
+- A first installation selects CPU/libx265 by default. A real CPU/GPU verification must be completed before a queue can start.
+- Encoder verification runs reproducible 1080p test encodes and verifies only backends that are both present in FFmpeg and supported by installed hardware: CPU/libx265, NVIDIA/hevc_nvenc, Intel/hevc_qsv, and AMD/hevc_amf.
+- Multiple verified encoder alternatives can be selected from a dropdown while the queue is stopped. The encoder cannot be changed while a queue is running.
+- Benchmarks display speed, SSIM, and test size. For NVIDIA, VRAM before/maximum/increase, GPU/encoder utilization, and temperature are also measured when `nvidia-smi` is available. VRAM is diagnostic only and is not user-controlled.
+- NVIDIA capability testing covers CUDA decode, preset P4, VBR/CQ, Spatial AQ, Temporal AQ, lookahead, surfaces, and multipass, among other features. Features that fail the real test are marked unsupported. Main encoding retains the conservative/stable NVENC profile and does not automatically enable new optional features.
+- Encoder results are stored in `Data\encoder-capabilities.json` and `Data\encoder-benchmark.json`. Verification becomes stale if the FFmpeg version, GPU list, or graphics driver changes.
+- The banner dynamically displays the selected encoder, for example CPU HEVC, NVIDIA HEVC NVENC, Intel HEVC QSV, or AMD HEVC AMF.
+- FFmpeg and MKVToolNix updates now back up the active version under `Tools\ToolBackups`. The tool manager includes **Versions/restore** and can restore a previous local version if an update causes problems.
+- FFmpeg is updated through staging and verified before activation. Failed activation automatically restores the previous version. Changing FFmpeg invalidates the CPU/GPU verification.
+- The Custom theme's three hex fields now have compact live color previews beside each value. The preview changes immediately when a valid `#RRGGBB` value is entered. Saving Custom colors restarts Start Center while the queue is stopped so the theme is applied immediately.
+- Green/red path and program status indicators are restored after theme application so their semantic status colors are retained.
+- Theme/language restart uses the normal UAC startup logic, so a saved Windows Update protection setting does not lose elevation after a theme change.
+- Work queue, queue isolation, error queue, session statistics, saved queue packages, UAC/Windows Update protection, file formats, and dashboard are unchanged except that the selected encoder is passed through the job file.
 
 ## 0.11.42
-- Arbetskön använder en enda vertikal knapprad i både Kö och Allt i ett.
-- Ny temaväljare under Inställningar: Ljus, Mörk, Per månad och Custom.
-- Per månad väljer automatiskt den färgpalett som hör till aktuell månad.
-- Custom sparar tre hex-färger: banner, sekundär/panel och bakgrund.
-- Temat används även av kömonitorn/statistikfönstret.
+- The work queue uses a single vertical button column in both Queue and All-in-one modes.
+- Added a theme selector under Settings: Light, Dark, By month, and Custom.
+- By month automatically selects the color palette associated with the current month.
+- Custom stores three hex colors: banner, secondary/panel, and background.
+- The theme is also used by the queue monitor/statistics window.
 
 ## 0.11.41 - 2026-08-11
-- UI: omarkerade kryssrutor och radioknappar visas med grå text men är fortsatt klickbara; markerade val visas svart.
-- UAC: Windows Update-skyddet kan väljas även när Start Center inte är eleverat; UAC begärs först när valet sparas.
-- UI: UAC-sköld visas framför Windows Update-skyddet.
-- Arbetskö: "Ladda..." har bytt namn till "Lägg till i kön" / "Add to queue".
-- Arbetskö: Loggar-knappen har flyttats från Kö/Allt i ett till Inställningar under Visa statistik.
-- Kömonitor: bottenradens status och knappar överlappar inte längre; Visa/Dölj detaljer visas fullt ut vid resize.
+- UI: unchecked checkboxes and radio buttons are displayed with gray text but remain clickable; selected choices are displayed in black.
+- UAC: Windows Update protection can be selected even when Start Center is not elevated; UAC is requested only when the setting is saved.
+- UI: a UAC shield is displayed before the Windows Update protection option.
+- Work queue: "Load..." has been renamed to "Add to queue".
+- Work queue: the Logs button has moved from Queue/All-in-one to Settings under View statistics.
+- Queue monitor: the bottom-row status and buttons no longer overlap; Show/Hide details remains fully visible when resized.
 
 ## 0.11.40 - 2026-08-11
 
-- Allt i ett: städad tvåkolumnslayout för arbetsköknappar så kontroller inte överlappar eller klipps.
-- Spara kö / Öppna kö finns nu i både Kö och Allt i ett.
-- Val-fliken omdisponerad: körläge och omkodningskriterier överst, övriga val samlade under.
-- UAC: MediaPrep startar normalt utan administratörsrättigheter. Elevation begärs endast när användaren uttryckligen sparat "Förhindra automatisk Windows Update-omstart under kön".
-- Första uppstarten har Windows Update-omstartsskydd avstängt.
-- När skyddet aktiveras och valen sparas startas Start Center om via UAC; aktuell kölista sparas före omstarten.
-- Windows Update-skydd kan inte ändras/sparas under pågående kö; användaren får ett tydligt meddelande i stället för omstart.
-- Arkivstatistik: gamla stage 8/9-poster med dokumenterat lyckad returkopiering rekonstrueras som klara, vilket stabiliserar progressbaren och "Klara".
-- Sessionsstatistik: en Out-copy markerar inte längre Result=Completed innan QueueStage 10 faktiskt har skrivits.
+- All-in-one: cleaned up the two-column work-queue button layout so controls do not overlap or get clipped.
+- Save queue / Open queue are now available in both Queue and All-in-one modes.
+- The Options tab was reorganized: run mode and encoding criteria are at the top, with remaining options grouped below.
+- UAC: MediaPrep normally starts without administrator rights. Elevation is requested only when the user explicitly saves "Prevent automatic Windows Update restart during the queue".
+- Windows Update restart protection is disabled on first startup.
+- When protection is enabled and settings are saved, Start Center restarts through UAC; the current queue list is saved before restart.
+- Windows Update protection cannot be changed/saved while a queue is running; the user receives a clear message instead of a restart.
+- Archived statistics: old stage 8/9 entries with a documented successful return copy are reconstructed as completed, stabilizing the progress bar and "Completed" count.
+- Session statistics: an Out-copy no longer marks `Result=Completed` before QueueStage 10 has actually been written.
 
 ## 0.11.39 - 2026-08-11
 
-- Sessionsklockan startar först när kön startas och räknar endast aktiv kötid; den tickar inte bara för att Start Center är öppet.
-- Samtliga köer registreras i sessionsstatistiken vid start, inte först när respektive kö börjar behandlas.
-- Statistikfönstrets gamla `Uppdatera nu` ersätts av **Ladda statistik...** och **Aktuell**. Arkiverade statistics-run JSON kan visas inklusive kvar/fel/långsamma kopieringar.
-- Start Center får **Spara kö** och **Öppna kö**. Köpaketet är ZIP och innehåller relevanta JSON-filer inklusive sessionsstatistik.
-- Vid uppstart detekteras en ofärdig session och användaren får välja Fortsätt, Spara till senare eller Ta bort.
-- Sessionsfilen arkiveras först när Start Center stängs normalt och ingen köprocess fortfarande körs.
+- The session clock starts only when the queue starts and counts only active queue time; it does not run merely because Start Center is open.
+- All queues are registered in session statistics at startup, rather than only when each queue begins processing.
+- The statistics window's old `Refresh now` action is replaced with **Load statistics...** and **Current**. Archived statistics-run JSON files can be displayed, including remaining/error/slow-copy data.
+- Start Center adds **Save queue** and **Open queue**. The queue package is a ZIP containing relevant JSON files, including session statistics.
+- At startup, an unfinished session is detected and the user can choose Continue, Save for later, or Delete.
+- The session file is archived only when Start Center closes normally and no queue process is still running.
 
 ## 0.11.38 - 2026-08-10
 
-- Rättar dashboard-fel på stora bytevärden över Int32-gränsen (2 147 483 647).
-- Utrymmesbesparing beräknas nu med Double/64-bitars storleksvärden utan Math.Max(Int32)-överlagring.
-- Dashboarden kan därför fortsätta uppdatera statistik för stora köer/filer utan felet "Cannot convert ... to System.Int32".
+- Fixed dashboard errors for large byte values above the Int32 limit (2,147,483,647).
+- Space savings are now calculated using Double/64-bit size values without the `Math.Max(Int32)` overload.
+- The dashboard can therefore continue updating statistics for large queues/files without the error "Cannot convert ... to System.Int32".
 
 ## 0.11.36 - 2026-08-10
-- Ny ren kataloglayout: körbara PowerShell-skript ligger under `App\`; rotmappen innehåller endast launcher och dokumentation.
-- `config.json` och `mediaprep.preferences.json` ligger under `Data\`.
-- Start Center migrerar automatiskt äldre rot-skript till `Data\LegacyLayoutBackup_*` och flyttar äldre konfigurationsfiler till `Data\` när det behövs.
-- Alla interna sökvägar har gåtts igenom för App/Data-layouten: Start Center, Queue Host, Queue, Dashboard, MediaPrep, verktygshanteraren, installeraren och felkö-batchen.
-- Sessionsstatistiken lagrar varje faktisk kopiering som en `CopyEvent`; om samma fil kopieras igen under samma session räknas även den nya överföringen.
-- `Totalt kopierat från UNC`, `Totalt kopierat tillbaka`, kopieringstid och MB/s summeras från hela sessionens copy-events.
-- Dashboardens huvud-progressbar visar klara filer / alla registrerade filer i hela sessionen.
-- Dashboard-logg skapas alltid för INFO/WARN/ERROR; Verbose lägger endast till VERBOSE-rader.
-- JSON-skrivningar i huvudmotorn och Start Center görs atomiskt via temporär fil för att minska risken att dashboarden läser en halvskriven sessions-/köfil.
-- Installeraren kopierar endast programfiler och standardkonfiguration, aldrig befintliga media-, logg-, kö- eller statistikdata.
+- Added a clean directory layout: executable PowerShell scripts are stored under `App\`; the root folder contains only the launcher and documentation.
+- `config.json` and `mediaprep.preferences.json` are stored under `Data\`.
+- Start Center automatically migrates older root scripts to `Data\LegacyLayoutBackup_*` and moves older configuration files into `Data\` when required.
+- All internal paths were reviewed for the App/Data layout: Start Center, Queue Host, Queue, Dashboard, MediaPrep, tool manager, installer, and error-queue batch file.
+- Session statistics store every actual copy as a `CopyEvent`; if the same file is copied again during the same session, the new transfer is counted as well.
+- `Total copied from UNC`, `Total copied back`, copy time, and MB/s are aggregated from all copy events in the session.
+- The dashboard's main progress bar displays completed files / all registered files across the entire session.
+- A dashboard log is always created for INFO/WARN/ERROR; Verbose adds only VERBOSE entries.
+- JSON writes in the main engine and Start Center are atomic through a temporary file to reduce the risk of the dashboard reading a partially written session/queue file.
+- The installer copies only program files and default configuration, never existing media, logs, queue data, or statistics data.
 
 # Changelog
 
 ## 0.11.35 - 2026-08-10
-- Ny sessionsbaserad statistikfil: `Data\statistics-run-current.json`.
-- Statistiksessionen skapas när Start Center öppnas och lever över flera kökörningar tills Start Center stängs.
-- Varje UNC-kö och fil läggs till i samma sessionsfil med kopiering in/ut, storlekar, resultat och köstatus.
-- Körningsstatistik-fliken använder sessionsfilen som sanningskälla och nollställs därför inte mellan enskilda UNC-köer.
-- `Snitt in` och `Snitt tillbaka` beräknas som total MB / faktisk total kopieringstid för hela sessionen.
-- När Start Center stängs arkiveras sessionen under `Data\Statistics`.
-- Om en gammal current-fil hittas vid start bevaras den som en recovered-session innan en ny session skapas.
+- Added a new session-based statistics file: `Data\statistics-run-current.json`.
+- The statistics session is created when Start Center opens and persists across multiple queue runs until Start Center closes.
+- Every UNC queue and file is added to the same session file with inbound/outbound copy information, sizes, results, and queue status.
+- The Run statistics tab uses the session file as its source of truth and therefore does not reset between individual UNC queues.
+- `Average in` and `Average back` are calculated as total MB / actual total copy time for the entire session.
+- When Start Center closes, the session is archived under `Data\Statistics`.
+- If an old current file is found at startup, it is preserved as a recovered session before a new session is created.
 
 ## 0.11.35
 
-- UNC-köer är nu strikt isolerade: en köpost kopieras, muxas, analyseras, omkodas och återförs innan nästa köpost startar.
-- Scan-MediaLibrary begränsas i köläge till endast de lokala källfiler som importerades för aktuell UNC-kö.
-- MKV-analys och NVENC-rekommendation begränsas till endast ExpectedOutput-filer som tillhör aktuell UNC-kö.
-- Gamla/återupptagna lokala filer från andra köposter får inte längre dras in i aktuell bearbetning.
-- Detta minskar risken att UnProcessed/Processed fyller lokal disk när många UNC-mappar ligger i kön.
+- UNC queues are now strictly isolated: one queue item is copied, muxed, analyzed, encoded, and returned before the next queue item starts.
+- In queue mode, `Scan-MediaLibrary` is limited to only the local source files imported for the current UNC queue.
+- MKV analysis and NVENC recommendations are limited to ExpectedOutput files belonging to the current UNC queue.
+- Old/resumed local files from other queue items can no longer be pulled into the current processing run.
+- This reduces the risk of `UnProcessed`/`Processed` filling local disk space when many UNC folders are queued.
 
 ## 0.11.33
 
-- Rättar ett köstopp där en trasig eller gammal lokal AVI/MPG/MPEG/TS/MP4 i `UnProcessed` kunde avbryta alla efterföljande UNC-köer under ffprobe-steget.
-- `ffprobe` startas nu via `System.Diagnostics.Process`, så stderr från en ogiltig mediefil inte blir ett oavsiktligt `NativeCommandError` i Windows PowerShell 5.1.
-- Om ffprobe inte kan analysera en lokal källfil flyttas arbetskopian till `Error`, registreras som `SourceProbe` i felkön och huvudkön fortsätter med nästa fil. UNC-originalet påverkas inte.
-- Felorsaken innehåller nu ffprobes verkliga exitkod och feltext för enklare felsökning.
+- Fixed a queue-stopping condition where a broken or old local AVI/MPG/MPEG/TS/MP4 file in `UnProcessed` could abort all subsequent UNC queues during the ffprobe stage.
+- `ffprobe` is now started through `System.Diagnostics.Process`, so stderr from an invalid media file does not become an unintended `NativeCommandError` in Windows PowerShell 5.1.
+- If ffprobe cannot analyze a local source file, the working copy is moved to `Error`, registered as `SourceProbe` in the error queue, and the main queue continues with the next file. The UNC original is not affected.
+- The error reason now contains ffprobe's actual exit code and error text for easier troubleshooting.
 
 ## 0.11.32
-- Rättar falska "UNC-kopian saknar videospår" för giltiga MPG/MPEG->MKV genom ffprobe JSON-verifiering.
-- Skiljer på ffprobe-fel och verkligt saknat video-/ljudspår.
-- Fel vid UNC-återflyttning sparar ErrorKind/PreviousStage/LocalPath så lokal fungerande MKV kan granskas.
-- "Fortsätt" återställer publiceringsfel till QueueStage 8 (Väntar återflytt) i stället för att muxa/analysera om.
-- Felkö-knapparna ligger i en egen dockad knapp-rad och kan inte längre täckas av tabellens resize.
-- Inventory-baserade fel visar LocalOutput/ErrorLocalPath i kolumnen Error-sökväg.
+- Fixed false "UNC copy has no video stream" errors for valid MPG/MPEG-to-MKV conversions through ffprobe JSON verification.
+- Distinguishes ffprobe errors from genuinely missing video/audio streams.
+- UNC return-copy failures store `ErrorKind`/`PreviousStage`/`LocalPath` so a locally working MKV can be reviewed.
+- **Continue** restores publishing errors to QueueStage 8 (Waiting for return copy) instead of remuxing/reanalyzing.
+- Error-queue buttons now sit in their own docked button row and can no longer be covered when the table is resized.
+- Inventory-based errors display `LocalOutput`/`ErrorLocalPath` in the Error path column.
 
 ## 0.11.31
 
-- Rättar dashboard-felet `The property 'Sum' cannot be found on this object`.
-- Kömonitor summerar kopierade byte/tider defensivt rad för rad och fungerar även innan `queue-copy-stats.json` skapats.
-- Genomsnittlig kopieringshastighet beräknas utan `Measure-Object`, för bättre PowerShell 5.1-kompatibilitet.
-- Saknade runtime-JSON-filer loggas bara en gång och loggas igen när de dyker upp.
+- Fixed the dashboard error `The property 'Sum' cannot be found on this object`.
+- The queue monitor defensively sums copied bytes/times row by row and works even before `queue-copy-stats.json` has been created.
+- Average copy speed is calculated without `Measure-Object` for better PowerShell 5.1 compatibility.
+- Missing runtime JSON files are logged only once and logged again when they appear.
 
-﻿# Changelog
+# Changelog
 
 ## 0.11.30
 
-- Felkö-vyn har tre manuella åtgärder per markerad fil: **Granska**, **Fortsätt** och **Ta bort**.
-- Granska öppnar den lokala muxade MKV-filen med Windows standardspelare.
-- Fortsätt tar bort felposten och återställer posten till bästa säkra QueueStage utifrån lokala filer och ffprobe (HEVC => Kodad, annan MKV => Muxad, lokal källa => Lokal källa klar).
-- Ta bort rensar posten ur både felkön och hela köinventeringen samt tar bort lokala arbets-/tempfiler. UNC-originalet rörs aldrig.
-- Manuella felköåtgärder skrivs till dashboardens verbose-logg.
+- The error-queue view provides three manual actions for each selected file: **Review**, **Continue**, and **Delete**.
+- Review opens the local muxed MKV file with the Windows default player.
+- Continue removes the error entry and restores the item to the safest QueueStage based on local files and ffprobe (HEVC => Encoded, other MKV => Muxed, local source => Local source ready).
+- Delete removes the item from both the error queue and the full queue inventory and deletes local work/temp files. The UNC original is never touched.
+- Manual error-queue actions are written to the dashboard verbose log.
 
 ## 0.11.29
-- Rättar QueueStage-matchning efter muxning: källor som `.ts`, `.mp4`, `.avi`, `.mpg` och `.mpeg` matchas nu mot motsvarande `.mkv`-post via samma relativa basnamn.
-- Felkö-vyn läser nu `Data\error-queue.json` direkt och kompletterar med QueueStage 90–92, så encoderfel syns även om en statusuppdatering missats.
-- Kömonitorn får separat räknare **Klara för flytt** för QueueStage 8.
-- **Kvar i kön** fortsätter räkna alla ej färdiga poster över samtliga UNC-köer.
-- Dashboardens JSON-läsning görs mer tolerant mot saknade/null-fält för att undvika att hela uppdateringen bryts.
+- Fixed QueueStage matching after muxing: sources such as `.ts`, `.mp4`, `.avi`, `.mpg`, and `.mpeg` are now matched to the corresponding `.mkv` item using the same relative base name.
+- The error-queue view now reads `Data\error-queue.json` directly and supplements it with QueueStage 90–92 so encoder errors are visible even if a status update was missed.
+- The queue monitor gets a separate **Ready to move** counter for QueueStage 8.
+- **Remaining in queue** continues to count all unfinished items across all UNC queues.
+- Dashboard JSON reading is more tolerant of missing/null fields to prevent the entire refresh from failing.
 
 ## 0.11.28 - 2026-08-10
 
-- Flyttar **Visa statistik** till Programinställningar i Inställningar.
-- Döljer Start Centers tomma PowerShell-värdfönster.
-- Döljer kömonitorns tomma PowerShell-värdfönster.
-- Startar det detaljerade Queue Host-konsolfönstret dolt.
-- Lägger till **Visa detaljer / Dölj detaljer** i kömonitorn för att toggla Queue Host-konsolen vid behov.
-- Queue Host publicerar sitt fönsterhandtag lokalt i `Data\queue-console-window.json` under körningen.
-- Verbose-loggar fungerar fortsatt även när konsolfönstren är dolda.
+- Moved **View statistics** to Program settings under Settings.
+- Hides Start Center's empty PowerShell host window.
+- Hides the queue monitor's empty PowerShell host window.
+- Starts the detailed Queue Host console window hidden.
+- Added **Show details / Hide details** in the queue monitor to toggle the Queue Host console when needed.
+- Queue Host publishes its window handle locally in `Data\queue-console-window.json` while running.
+- Verbose logs continue to work even when the console windows are hidden.
 
 # 0.11.27
 
 ## 0.11.27 - 2026-08-10
 
-- Rättar ParserError i `MediaPrep-Queue-Dashboard.ps1` där bokstavliga `` `r`n `` hade hamnat i skriptkoden.
-- Kömonitorn kan åter startas automatiskt från Start Center.
-- När **Verbose logging** är aktivt får kömonitorn en egen logg: `Loggar\MediaPrep-Queue-Dashboard_YYYY-MM-DD_HH-mm-ss.log`.
-- Dashboard-loggen registrerar start/stängning, JSON-läsfel, layoutfel och uppdateringsfel.
-- Start Center skriver dessutom `Loggar\MediaPrep-Queue-Dashboard-Launcher.log` vid verbose för att felsöka själva starten av statistikprocessen.
-- Behåller stöd för `.ts`, `.mp4`, `.avi`, `.mpg` och `.mpeg`.
+- Fixed a ParserError in `MediaPrep-Queue-Dashboard.ps1` where literal `` `r`n `` sequences had ended up in the script code.
+- The queue monitor can once again be started automatically from Start Center.
+- When **Verbose logging** is enabled, the queue monitor gets its own log: `Loggar\MediaPrep-Queue-Dashboard_YYYY-MM-DD_HH-mm-ss.log`.
+- The dashboard log records startup/shutdown, JSON read errors, layout errors, and refresh errors.
+- Start Center also writes `Loggar\MediaPrep-Queue-Dashboard-Launcher.log` in verbose mode to troubleshoot the startup of the statistics process itself.
+- Retains support for `.ts`, `.mp4`, `.avi`, `.mpg`, and `.mpeg`.
 
 # 0.11.26
 
 ## 0.11.26 - 2026-08-10
-- Added `.mpg` and `.mpeg` as supported source formats throughout queue scanning, All-in-one, ffprobe analysis, muxing and summaries.
+- Added `.mpg` and `.mpeg` as supported source formats throughout queue scanning, All-in-one, ffprobe analysis, muxing, and summaries.
 - Fixed regression where the queue statistics window did not always open automatically when starting the queue.
 - Queue dashboard launch now uses a single quoted Windows PowerShell 5.1 argument string with `-STA`, preserving paths that contain spaces.
 - Start Center now reports the dashboard process PID on successful launch and shows an explicit error if the dashboard cannot be started.
 
-- Rättar kömonitor där kolumnerna krympte vid varje 1-sekundsuppdatering.
-- DataGridView använder nu fasta kolumnbredder; endast sökväg/start-kolumnen anpassas när fönstret ändrar storlek.
-- Själva dashboard-refreshen ändrar inte längre kolumnlayouten.
+- Fixed the queue monitor where columns shrank during every one-second refresh.
+- DataGridView now uses fixed column widths; only the path/start column adapts when the window is resized.
+- Dashboard refresh itself no longer changes the column layout.
 
-﻿# Changelog
+# Changelog
 
 ## 0.11.25 - 2026-08-10
-- Lade till fullständigt stöd för `.avi` som källformat tillsammans med `.ts` och `.mp4`.
-- Källfiler analyseras med `ffprobe` före muxning.
-- ffprobe-resultatet innehåller container, video-/audiocodec, profil, pixel format, upplösning, FPS, längd, bitrate och antal strömmar.
-- Probe-data följer med skanningsposten och sparas i ködashboarden när filen går in i muxsteget.
-- AVI använder samma undertext-, mux-, analys-, NVENC-, felkö- och UNC-flöde som övriga källformat.
+- Added full `.avi` source-format support alongside `.ts` and `.mp4`.
+- Source files are analyzed with `ffprobe` before muxing.
+- ffprobe results include container, video/audio codec, profile, pixel format, resolution, FPS, duration, bitrate, and stream count.
+- Probe data follows the scan item and is stored in the queue dashboard when the file enters the mux stage.
+- AVI uses the same subtitle, mux, analysis, NVENC, error-queue, and UNC workflow as the other source formats.
 
 ## 0.11.22 – 2026-08-10
 
-- Nytt separat kömonitorfönster som öppnas automatiskt när kön startas.
-- Ny knapp **Visa statistik** i Startcenter för att öppna kömonitorn igen.
-- Kömonitorn läser lokala `Data\queue-dashboard-inventory.json` och behöver inte läsa UNC för att visa statistik.
-- `queue-dashboard-inventory.json` version 2 innehåller nu `errors` och `items`.
-- Kömonitorn har vyerna **Kvar i kön**, **Felkö**, **Körningsstatistik** och **Långsamma kopieringar**.
-- Felkö-vyn har knappen **Bearbeta felkön** som startar tolerant avkodning manuellt.
-- Kopiering från UNC och tillbaka till UNC klockas per videofil med byte, tid och MB/s i `Data\queue-copy-stats.json`.
-- Köstart/slut sparas i `Data\queue-run-current.json` med starttid, sluttid och total körtid.
-- Långsamma kopieringar flaggas om de går under 30 MB/s eller under 50 % av aktuell genomsnittshastighet.
+- Added a separate queue-monitor window that opens automatically when the queue starts.
+- Added a **View statistics** button in Start Center to reopen the queue monitor.
+- The queue monitor reads local `Data\queue-dashboard-inventory.json` and does not need to read UNC paths to display statistics.
+- `queue-dashboard-inventory.json` version 2 now contains `errors` and `items`.
+- The queue monitor has views for **Remaining in queue**, **Error queue**, **Run statistics**, and **Slow copies**.
+- The Error queue view has a **Process error queue** button that manually starts tolerant decoding.
+- Copying from UNC and back to UNC is timed per video file with bytes, time, and MB/s in `Data\queue-copy-stats.json`.
+- Queue start/end is stored in `Data\queue-run-current.json` with start time, end time, and total run time.
+- Slow copies are flagged when they fall below 30 MB/s or below 50% of the current average speed.
 
 ## 0.11.20 – 2026-08-10
 
-- Flyttar köstatistiken till en egen fast GroupBox i övre högra delen av Arbetskö, ovanför kölistan.
-- Statistiketiketterna skapas med 0-värden direkt och är alltid synliga i Kö-läge före inventering.
-- Behåller stegvis statistikuppdatering när giltiga filer hittas samt vid köändringar.
-- Förtydligar verbose STALL WARNING när både mediatid och FFmpeg CPU-tid står still.
+- Moved queue statistics into a dedicated fixed GroupBox in the upper-right section of Work queue, above the queue list.
+- Statistics labels are created immediately with zero values and remain visible in Queue mode before inventory begins.
+- Retains incremental statistics updates as valid files are found and when the queue changes.
+- Clarified verbose STALL WARNING reporting when both media time and FFmpeg CPU time remain unchanged.
 
 ## 0.11.19 – 2026-08-10
 
-- Köstatistik byggs nu med fasta etiketter direkt i Översikt och hålls alltid synlig i Kö-läge.
-- Statistiken uppdateras stegvis under UNC-inventering och när kön ändras.
-- Verbose-loggning visar nu FFmpeg CPU-tidsdelta, arbetsminne, trådantal och hur länge mediatiden stått still.
-- Verbose skriver STALL WARNING när mediatiden inte avancerat på minst 20 sekunder, tillsammans med GPU-snapshot.
+- Queue statistics are now built with fixed labels directly in Overview and remain visible in Queue mode.
+- Statistics update incrementally during UNC inventory and when the queue changes.
+- Verbose logging now displays FFmpeg CPU-time delta, working memory, thread count, and how long media time has remained stalled.
+- Verbose logging writes STALL WARNING when media time has not advanced for at least 20 seconds, together with a GPU snapshot.
 
 ## 0.11.18 – 2026-08-10
 
-- Köstatistik ligger alltid synlig i Kö-läge och hålls längst fram i Startcentret.
-- Statistik uppdateras vid köändringar och stegvis under UNC-inventering.
-- Verbose logging skickas nu vidare till MediaPrep-processen.
-- Verbose loggar full FFmpeg-kommandorad, FFmpeg-version, NVENC-parametrar och GPU-snapshot före/efter varje omkodning.
-- GPU-snapshot innehåller bl.a. drivrutin, P-state, temperatur, GPU-/encoderbelastning och klockfrekvenser.
+- Queue statistics remain visible in Queue mode and are kept in front in Start Center.
+- Statistics update when the queue changes and incrementally during UNC inventory.
+- Verbose logging is now passed through to the MediaPrep process.
+- Verbose logging records the full FFmpeg command line, FFmpeg version, NVENC parameters, and GPU snapshots before/after each encode.
+- GPU snapshots include driver, P-state, temperature, GPU/encoder utilization, and clock frequencies.
 
 ## 0.11.17 – 2026-08-10
 
-- Köstatistik visas alltid i både Kö och Allt-i-ett.
-- Köstatistik räknas om direkt när poster läggs till, tas bort eller flyttas.
-- UNC-inventering uppdaterar statistiken för varje giltig TS/MP4-fil som hittas.
-- Allt-i-ett visar även kvarvarande undertexter och antal klara MKV-filer.
+- Queue statistics are always displayed in both Queue and All-in-one modes.
+- Queue statistics are recalculated immediately when items are added, removed, or moved.
+- UNC inventory updates statistics for every valid TS/MP4 file found.
+- All-in-one also displays remaining subtitles and the number of completed MKV files.
 
-﻿## 0.11.16 – 2026-08-10
+## 0.11.16 – 2026-08-10
 
-- Köstatusraden visar endast om kön körs eller inte.
-- Filnamn och nästa köpost tas bort från översikten.
-- Antal, storlek och återflyttningsstatus visas endast i Köstatistik.
+- The queue status row now displays only whether the queue is running.
+- File name and next queue item have been removed from Overview.
+- Counts, size, and return-copy status are displayed only in Queue statistics.
 
 ## 0.11.15 – 2026-08-10
 
-- Starta hela kön gör nu en förkontroll av samtliga UNC-mappar innan batchen startar.
-- Vid saknad UNC-åtkomst visas autentisering i den eleverade MediaPrep-sessionen och SMB-anslutningen etableras där.
-- Varje UNC-kömapp verifieras för läsning, skrivning och radering med en tillfällig access-testfil.
-- Köstatistiken förenklas till kvarvarande filer, bearbetade hela kön, kvarvarande storlek och klara för återflytt.
-- Köstatistikens etiketter är alltid synliga i Kö-läge.
-- Språkfiler version 1.3.8.
+- Start entire queue now prechecks all UNC folders before the batch begins.
+- If UNC access is missing, authentication is presented in the elevated MediaPrep session and the SMB connection is established there.
+- Each UNC queue folder is verified for read, write, and delete access using a temporary access-test file.
+- Queue statistics are simplified to remaining files, processed across the full queue, remaining size, and ready for return copy.
+- Queue-statistics labels are always visible in Queue mode.
+- Language files version 1.3.8.
 
 ## 0.11.14 – 2026-08-10
 
-- Ny köstatistik på Översikt: kvarvarande videofiler, kvarvarande storlek, undertexter, bearbetade filer, totalt antal och filer klara för UNC-återföring.
-- Statistiken bygger en inventering av UNC-kön och uppdateras automatiskt under körningen.
-- Rensningen av tomma lokala mappar omfattar nu även `Processed`.
-- Startcenter 3.3.14 och språkfiler 1.3.7.
+- Added queue statistics to Overview: remaining video files, remaining size, subtitles, processed files, total count, and files ready for UNC return.
+- Statistics build an inventory of the UNC queue and update automatically during processing.
+- Cleanup of empty local folders now also includes `Processed`.
+- Start Center 3.3.14 and language files 1.3.7.
 
 ## 0.11.13 – 2026-08-08
 
-- Rättar NVENC-progress i Windows PowerShell 5.1 genom direkt läsning av FFmpegs StandardOutput.
-- Den blå progressrutan uppdateras löpande från varje komplett `progress=continue`-block.
-- Progress loggas fortfarande var femte sekund utan lila konsolrader.
+- Fixed NVENC progress in Windows PowerShell 5.1 by reading FFmpeg StandardOutput directly.
+- The blue progress box now updates continuously from each complete `progress=continue` block.
+- Progress is still logged every five seconds without purple console lines.
 
 ## 0.11.12 – 2026-08-08
 
-- NVENC-progress läses nu löpande via `-progress pipe:1` i stället för en direkt progressfil som kunde buffras till slutet.
-- Den blå progressrutan visar filnummer, filnamn, videotid, procent, kodningshastighet och uppskattad återstående tid.
-- `[PROGRESS]` sparas i loggfilen var femte sekund men skrivs inte längre som lila konsolrader.
-- UNC-import och UNC-återföring visar antal, totalantal, procent och aktuell fil i samma utökade progressformat.
+- NVENC progress is now read continuously through `-progress pipe:1` instead of a direct progress file that could be buffered until completion.
+- The blue progress box displays file number, file name, media time, percentage, encoding speed, and estimated time remaining.
+- `[PROGRESS]` is stored in the log file every five seconds but is no longer written as purple console lines.
+- UNC import and UNC return display count, total count, percentage, and current file using the same extended progress format.
 
 ## 0.11.11 – 2026-08-08
 
-- Visar löpande NVENC-tid, procent, hastighet och återstående tid i den blå Write-Progress-rutan för varje fil.
-- Skriver dessutom en [PROGRESS]-rad till konsol och logg var femte sekund.
-- Visar kopieringsprogress när färdiga MKV-filer återförs till UNC.
-- Rensar tomma undermappar i UnProcessed och Processed efter återföring och vid köslut.
-- Rensningen fungerar även när en tidigare avbruten batch återupptas; mappar med kvarvarande filer lämnas orörda.
+- Displays continuous NVENC time, percentage, speed, and remaining time in the blue Write-Progress box for each file.
+- Also writes a `[PROGRESS]` line to the console and log every five seconds.
+- Displays copy progress when completed MKV files are returned to UNC.
+- Cleans empty subfolders in `UnProcessed` and `Processed` after return copy and at queue completion.
+- Cleanup also works when a previously interrupted batch is resumed; folders containing remaining files are left untouched.
 
 ## 0.11.10 – 2026-08-08
 
-- Rättar att en nyligen tillagd UNC-mapp försvann ur kön efter cirka 1,5 sekund.
-- Kön sparas nu omedelbart till inställningsfilen när en mapp läggs till.
-- Uppdateringstimern kan därför inte längre återställa listan till en äldre tom kö.
+- Fixed a newly added UNC folder disappearing from the queue after approximately 1.5 seconds.
+- The queue is now saved to the settings file immediately when a folder is added.
+- The refresh timer can therefore no longer restore the list to an older empty queue.
 
 ## 0.11.9 – 2026-08-08
 
-- Rättar UNC-återföring efter återstart när `LocalVideo` är tom för filer som redan fanns i `Processed`.
-- Kontrollerar tomma sökvägar innan `Test-Path` anropas.
-- Lägger till maskinläsbar FFmpeg-progress under NVENC-omkodning.
-- Skriver `[PROGRESS] bearbetad/total | procent | hastighet | kvar` var femte sekund till konsol och logg.
+- Fixed UNC return after restart when `LocalVideo` is empty for files already present in `Processed`.
+- Empty paths are checked before calling `Test-Path`.
+- Added machine-readable FFmpeg progress during NVENC encoding.
+- Writes `[PROGRESS] processed/total | percentage | speed | remaining` every five seconds to the console and log.
 
 ## 0.11.8 – 2026-08-08
 
-- Gör UNC-importen återstartssäker efter avbruten muxning eller NVENC-omkodning.
-- Hoppar över UNC-kopiering när motsvarande MKV redan finns i `Processed` och lokal källa saknas.
-- Återanvänder en komplett fil i `UnProcessed` när storleken matchar UNC-originalet.
-- Kopierar om lokala eller tillfälliga kopior som har fel storlek.
-- Tvingar ny muxning när både lokal källa och motsvarande MKV finns, eftersom föregående behandling då betraktas som ofärdig.
-- Sparar återstartsstatus i UNC-importmanifestet.
+- Made UNC import restart-safe after interrupted muxing or NVENC encoding.
+- Skips UNC copying when the corresponding MKV already exists in `Processed` and the local source is missing.
+- Reuses a complete file in `UnProcessed` when its size matches the UNC original.
+- Re-copies local or temporary copies that have the wrong size.
+- Forces a new mux when both the local source and corresponding MKV exist, because the previous processing is then considered incomplete.
+- Stores restart status in the UNC import manifest.
 
 ## 0.11.7 – 2026-08-08
 
-- Rättar ett Windows PowerShell 5.1-fel i kontrollen av sökvägar och program.
-- Generiska listor räknas och itereras nu direkt utan arraykonvertering.
-- Behåller gröna bockar och röda kryss för alla mappar och programfiler.
-- Uppdaterar språkfilerna till version 1.3.6.
+- Fixed a Windows PowerShell 5.1 error in path and program verification.
+- Generic lists are now counted and iterated directly without array conversion.
+- Retains green check marks and red crosses for all folders and program files.
+- Updated language files to version 1.3.6.
 
-﻿## 0.11.6 – 2026-08-08
+## 0.11.6 – 2026-08-08
 
-- Visar en grön bock eller ett rött kryss för alla konfigurerade mappar och program.
-- Döper om knappen till "Kontrollera sökvägar / program".
-- Kontrollen omfattar installationsmapp, arbetsmappar, datamappar och externa program.
-- Status uppdateras vid start, efter val av sökväg, efter sparande och vid manuell kontroll.
-- Uppdaterar språkfilerna till version 1.3.5.
+- Displays a green check mark or red cross for all configured folders and programs.
+- Renamed the button to "Check paths / programs".
+- Verification covers the installation folder, work folders, data folders, and external programs.
+- Status updates at startup, after selecting a path, after saving, and during manual verification.
+- Updated language files to version 1.3.5.
 
 ## 0.11.5 – 2026-08-08
 
-- Rättar startfel där statuskontrollen användes innan den skapats under StrictMode.
-- Flyttar första verktygsstatusuppdateringen till efter att statusfältet skapats.
-- Gör statusfunktionen säker vid tidig initiering.
+- Fixed a startup error where the status check was used before it had been created under StrictMode.
+- Moved the first tool-status refresh until after the status field has been created.
+- Made the status function safe during early initialization.
 
 ## 0.11.4 – 2026-08-08
 
-- Flyttar rubriken "Externa verktyg" till vänsterspalten mellan mappar och verktygssökvägar.
-- Tar bort den stora statusrutan för externa verktyg i högerspalten.
-- Ger språkfältet och verktygsknapparna fasta bredder så att knapptexterna syns bättre.
-- Justerar inställningslayouten så högerspalten får mer utrymme.
+- Moved the "External tools" heading to the left column between folders and tool paths.
+- Removed the large external-tools status box from the right column.
+- Gave the language field and tool buttons fixed widths so button labels are more visible.
+- Adjusted the Settings layout to give the right column more space.
 
-﻿# Ändringslogg
+# Changelog
 
 ## 0.11.3 – 2026-08-08
 
-- Återställer standardverktygssökvägar till `Tools\FFmpeg` och `Tools\MKVToolNix`.
-- Delar Preferences i en kompakt vänsterpanel och en separat panel för programspråk och verktygshantering.
-- Visar status och sökväg för FFmpeg, FFprobe och MKVToolNix.
-- Uppdaterar språkfilerna till version 1.3.4.
+- Restored default tool paths to `Tools\FFmpeg` and `Tools\MKVToolNix`.
+- Split Preferences into a compact left panel and a separate panel for application language and tool management.
+- Displays status and path for FFmpeg, FFprobe, and MKVToolNix.
+- Updated language files to version 1.3.4.
 
 # Changelog
 

@@ -163,9 +163,47 @@ try {
 
     Write-Step ('Installing MediaPrep ' + $version)
 
-    Get-ChildItem -LiteralPath $packageRoot -Force | ForEach-Object {
-        $destination = Join-Path $InstallPath $_.Name
-        Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+    $existingMediaPrep=Test-Path -LiteralPath (Join-Path $InstallPath 'App\MediaPrep-Start.ps1') -PathType Leaf
+    if($existingMediaPrep -and $Force){
+        # Safe in-place program update: preserve Data, preferences, statistics,
+        # downloaded tools, logs, queues and media working folders.
+        foreach($dirName in @('App','Languages','Installer')){
+            $srcDir=Join-Path $packageRoot $dirName
+            $dstDir=Join-Path $InstallPath $dirName
+            if(Test-Path -LiteralPath $dstDir -PathType Container){Remove-Item -LiteralPath $dstDir -Recurse -Force}
+            Copy-Item -LiteralPath $srcDir -Destination $dstDir -Recurse -Force
+        }
+        foreach($fileName in @('Start MediaPrep.cmd','README.md','CHANGELOG.md','LICENSE.md','THIRD-PARTY-NOTICES.md')){
+            $srcFile=Join-Path $packageRoot $fileName
+            if(Test-Path -LiteralPath $srcFile -PathType Leaf){Copy-Item -LiteralPath $srcFile -Destination (Join-Path $InstallPath $fileName) -Force}
+        }
+        $srcErrorHelper=Join-Path $packageRoot 'Error\Bearbeta felko.cmd'
+        if(Test-Path -LiteralPath $srcErrorHelper -PathType Leaf){
+            $dstError=Join-Path $InstallPath 'Error'
+            if(-not(Test-Path -LiteralPath $dstError -PathType Container)){New-Item -ItemType Directory -Path $dstError -Force|Out-Null}
+            Copy-Item -LiteralPath $srcErrorHelper -Destination (Join-Path $dstError 'Bearbeta felko.cmd') -Force
+        }
+    }
+    else {
+        Get-ChildItem -LiteralPath $packageRoot -Force | ForEach-Object {
+            $destination = Join-Path $InstallPath $_.Name
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+        }
+    }
+
+    foreach($requiredFolder in @('UnProcessed','Processed','Error','Data','Data\Temp','Data\Downloads','Data\Statistics','Data\ProgramBackups','Loggar','Rapporter','Tools','Tools\FFmpeg','Tools\MKVToolNix','Tools\ToolBackups')){
+        $requiredPath=Join-Path $InstallPath $requiredFolder
+        if(-not(Test-Path -LiteralPath $requiredPath -PathType Container)){New-Item -ItemType Directory -Path $requiredPath -Force|Out-Null}
+    }
+
+    # CMD does not understand an UTF-8 BOM before @echo. Normalize the launchers
+    # to plain ASCII/CRLF after installation. This also repairs older release ZIPs.
+    foreach($relativeCmd in @('Start MediaPrep.cmd','Error\Bearbeta felko.cmd')) {
+        $cmdPath=Join-Path $InstallPath $relativeCmd
+        if(Test-Path -LiteralPath $cmdPath -PathType Leaf) {
+            $cmdText=Get-Content -LiteralPath $cmdPath -Raw
+            Set-Content -LiteralPath $cmdPath -Value $cmdText -Encoding ASCII
+        }
     }
 
     $installedLauncher = Join-Path $InstallPath 'Start MediaPrep.cmd'
@@ -189,6 +227,25 @@ try {
     Write-Host ('"' + $installedLauncher + '"')
     Write-Host ''
     Write-Host 'FFmpeg and MKVToolNix can be installed from MediaPrep Settings.'
+
+    if([string]$ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') {
+        $clmWarning=@'
+MediaPrep was installed successfully, but this computer enforces PowerShell ConstrainedLanguage.
+
+MediaPrep requires PowerShell FullLanguage for its graphical interface.
+The MediaPrep scripts must be allowed/trusted by your organization's AppLocker or WDAC policy.
+
+Do not troubleshoot FFmpeg, MKVToolNix, or graphics drivers until this PowerShell policy restriction has been resolved.
+'@
+        Write-Host ''
+        Write-Host $clmWarning -ForegroundColor Yellow
+        try {
+            $msgExe=Join-Path $env:SystemRoot 'System32\msg.exe'
+            if(Test-Path -LiteralPath $msgExe -PathType Leaf) {
+                & $msgExe $env:USERNAME $clmWarning 2>$null | Out-Null
+            }
+        } catch {}
+    }
 }
 catch {
     Write-Host ''

@@ -43,3 +43,4 @@ Desktop.ini
 
 # Local diagnostics
 Test-MediaPrep-*.ps1
+Data/ProgramBackups/

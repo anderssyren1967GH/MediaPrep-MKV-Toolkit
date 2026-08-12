@@ -172,6 +172,8 @@ function Build-Args([object]$job,[string]$unc){
     if([bool](Get-P $job 'VerboseLogging' $false)){$a.Add('-VerboseLogging')}
     if([bool](Get-P $job 'IgnoreDecodeErrors' $false)){$a.Add('-IgnoreDecodeErrors')}
     if([bool](Get-P $job 'ProcessErrorQueue' $false)){$a.Add('-ProcessErrorQueue')}
+    $videoFormats=@((Get-P $job 'VideoFormats' @('.ts','.mp4','.avi','.mpg','.mpeg')) | ForEach-Object {[string]$_})
+    if($videoFormats.Count-gt0){$a.Add('-VideoFormats');$a.Add(($videoFormats -join ','))}
     $encoderId=[string](Get-P $job 'EncoderId' 'cpu-libx265')
     if(-not[string]::IsNullOrWhiteSpace($encoderId)){$a.Add('-EncoderId');$a.Add($encoderId)}
     if(-not[string]::IsNullOrWhiteSpace($unc)){

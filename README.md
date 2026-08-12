@@ -1,8 +1,8 @@
-# MediaPrep MKV Toolkit
+﻿# MediaPrep MKV Toolkit
 
 PowerShell toolkit for preparing, muxing, analyzing, organizing, and optionally re-encoding video files to MKV.
 
-**Current release: 0.11.51**
+**Current release: 0.11.52**
 
 [Download the latest packaged release](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases/latest)
 
@@ -17,7 +17,7 @@ The project intentionally remains PowerShell-based. There is no compiled applica
 ## Features
 
 - Windows PowerShell 5.1 based Start Center and processing workflow
-- TS, MP4, AVI, MPG, and MPEG source support
+- TS, MP4, AVI, MPG, MPEG, and optional MKV source support
 - MKV output
 - Subtitle handling for SRT and VTT
 - VTT-to-SRT conversion when required
@@ -84,6 +84,18 @@ MediaPrep currently handles:
 ```
 
 Output is written as MKV.
+
+On the **Options** tab, each source format can be enabled or disabled independently:
+
+```text
+TS    MP4    AVI    MPG    MPEG    MKV
+```
+
+TS, MP4, AVI, MPG, and MPEG are enabled by default. MKV is disabled by default. This makes it possible to run a queue only for selected legacy formats, for example AVI and MP4.
+
+When MKV is enabled, existing MKV files skip the remux stage and go directly to FFprobe analysis and optional HEVC re-encoding. The original source is not replaced until the prepared/encoded output has passed MediaPrep verification.
+
+For an UNC MKV source, the normal **delete original after success** setting means the verified result safely replaces the original MKV path. If original deletion is disabled, MediaPrep preserves the original and publishes the result as `name.mediaprep.mkv`.
 
 MediaPrep uses FFprobe to inspect the source before processing so container, codec, resolution, frame rate, pixel format, duration, bitrate, and stream information can be evaluated before muxing or encoding.
 
@@ -224,6 +236,18 @@ Changing FFmpeg invalidates the previous encoder verification so an incompatible
 
 The Start Center banner displays the active FFmpeg and MKVToolNix versions.
 
+### MediaPrep version management
+
+The same version manager can check GitHub Releases for up to the five most recent published MediaPrep versions. A newer release can be installed, or an older published release can be selected deliberately.
+
+Before MediaPrep program files are replaced, the current program version is backed up under:
+
+```text
+Data\ProgramBackups\
+```
+
+MediaPrep updates replace program files only. Existing `Data`, queue state, statistics, preferences, downloaded tools, logs, and media working folders are preserved. The update is applied by a separate updater process after Start Center closes, then MediaPrep is restarted. If activation fails, the updater attempts to restore the previous program files automatically.
+
 ## Process diagnostics
 
 The Start Center can display MediaPrep-started process names and process IDs (PIDs). This makes it easier to identify a remaining PowerShell, FFmpeg, MKVToolNix, queue-host, or related child process if a processing session is interrupted or the interface is closed unexpectedly.
@@ -251,7 +275,7 @@ The current distribution includes Swedish and English language files.
 
 ### Option 1 - PowerShell web installer
 
-The easiest way to install the latest MediaPrep MKV Toolkit release is with the PowerShell web installer.
+The easiest way to install the latest published MediaPrep release is with the PowerShell web installer.
 
 Open **Windows PowerShell** and run:
 
@@ -260,6 +284,22 @@ $installer = "$env:TEMP\Install-MediaPrep-Web.ps1"
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/main/Installer/Install-MediaPrep-Web.ps1" -OutFile $installer
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
+
+The default installation folder is:
+
+```text
+C:\MediaPrep MKV Toolkit
+```
+
+A different location can be supplied explicitly:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -InstallPath "D:\MediaPrep MKV Toolkit"
+```
+
+The web installer checks the latest GitHub Release, downloads the packaged ZIP, verifies SHA-256 when GitHub provides a digest, extracts the package, and installs it directly. It also repairs UTF-8 BOM issues in the CMD launchers from older packages.
+
+If the computer enforces PowerShell **ConstrainedLanguage**, installation can still complete, but MediaPrep's graphical Start Center requires **FullLanguage**. The installer and Start Center provide a clear warning instead of allowing the user to continue unnecessary FFmpeg/GPU troubleshooting.
 
 ### Option 2 - Packaged GitHub release
 
@@ -303,14 +343,17 @@ MediaPrep MKV Toolkit\
 │  ├─ MediaPrep-Queue-Host.ps1
 │  ├─ MediaPrep-Queue-Dashboard.ps1
 │  ├─ MediaPrep-Encoder-Test.ps1
+│  ├─ MediaPrep-Updater.ps1
 │  ├─ Manage-MediaPrepTools.ps1
 │  └─ Install-MediaPrep.ps1
 ├─ Data\
 │  ├─ Temp\
 │  ├─ Downloads\
-│  └─ Statistics\
+│  ├─ Statistics\
+│  └─ ProgramBackups\
 ├─ Error\
 ├─ Installer\
+│  └─ Install-MediaPrep-Web.ps1
 ├─ Languages\
 ├─ Loggar\
 ├─ Processed\

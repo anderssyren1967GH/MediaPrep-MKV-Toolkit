@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    MediaPrep MKV Toolkit 0.11.51 - muxar, analyserar och omkodar till MKV och analyserar färdiga filer.
+    MediaPrep MKV Toolkit 0.11.52 - muxar, analyserar och omkodar till MKV och analyserar färdiga filer.
 
 .DESCRIPTION
     Kompatibel med Windows PowerShell 5.1.
@@ -54,6 +54,7 @@ param(
     [switch]$DisableEncoding,
     [switch]$IgnoreDecodeErrors,
     [switch]$ProcessErrorQueue,
+    [string]$VideoFormats = '.ts,.mp4,.avi,.mpg,.mpeg',
     [string]$EncoderId = '',
     [string]$UncSourcePath = '',
     [switch]$ImportFromUnc,
@@ -68,8 +69,8 @@ $ErrorActionPreference = 'Stop'
 
 #region Grundinställningar
 $Script:AppName = 'MediaPrep MKV Toolkit'
-$Script:AppVersion = '0.11.51'
-$Script:BuildDate = '2026-08-11'
+$Script:AppVersion = '0.11.52'
+$Script:BuildDate = '2026-08-12'
 $Script:AppFolder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Script:Root = Split-Path -Parent $Script:AppFolder
 $Script:ConfigPath = Join-Path (Join-Path $Script:Root 'Data') 'config.json'
@@ -86,6 +87,17 @@ $Script:ResumeRemuxPaths = @{}
 $Script:VerboseLogging = [bool]$VerboseLogging
 $Script:IgnoreDecodeErrors = [bool]$IgnoreDecodeErrors
 $Script:ProcessErrorQueue = [bool]$ProcessErrorQueue
+$Script:AllowedVideoFormats = @('.ts','.mp4','.avi','.mpg','.mpeg','.mkv')
+$selectedFormats=New-Object System.Collections.Generic.List[string]
+foreach($format in @([string]$VideoFormats -split ',')){
+    $value=[string]$format
+    $value=$value.Trim().ToLowerInvariant()
+    if([string]::IsNullOrWhiteSpace($value)){continue}
+    if(-not $value.StartsWith('.')){$value='.'+$value}
+    if($Script:AllowedVideoFormats -contains $value -and -not($selectedFormats -contains $value)){$selectedFormats.Add($value)}
+}
+$Script:SelectedVideoFormats=@($selectedFormats.ToArray())
+if($Script:SelectedVideoFormats.Count-eq0){throw 'No video formats were selected for this run.'}
 $Script:EncoderId = [string]$EncoderId
 $Script:EncoderCapabilitiesPath = $null
 $Script:ErrorFolder = $null
@@ -581,8 +593,9 @@ function Import-UncMediaFiles {
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { throw "UNC-mappen kunde inte nås: $SourcePath" }
 
     Write-Host ''
-    Write-Status INFO ("Söker rekursivt efter TS/MP4/AVI/MPG/MPEG i UNC-mappen: {0}" -f $SourcePath)
-    $videos = @(Get-ChildItem -LiteralPath $SourcePath -File -Recurse -ErrorAction Stop | Where-Object { $_.Extension -match '^\.(ts|mp4|avi|mpg|mpeg)$' } | Sort-Object FullName)
+    $formatText=($Script:SelectedVideoFormats | ForEach-Object {$_.TrimStart('.').ToUpperInvariant()}) -join '/'
+    Write-Status INFO ("Söker rekursivt efter {0} i UNC-mappen: {1}" -f $formatText,$SourcePath)
+    $videos = @(Get-ChildItem -LiteralPath $SourcePath -File -Recurse -ErrorAction Stop | Where-Object { $Script:SelectedVideoFormats -contains $_.Extension.ToLowerInvariant() } | Sort-Object FullName)
     $records = New-Object System.Collections.Generic.List[object]
     $total = $videos.Count
 
@@ -644,8 +657,12 @@ function Import-UncMediaFiles {
 
             $base = [IO.Path]::Combine($video.DirectoryName,[IO.Path]::GetFileNameWithoutExtension($video.Name))
             $subtitle = $null
-            if (Test-Path -LiteralPath ($base + '.srt') -PathType Leaf) { $subtitle = Get-Item -LiteralPath ($base + '.srt') }
-            elseif (Test-Path -LiteralPath ($base + '.vtt') -PathType Leaf) { $subtitle = Get-Item -LiteralPath ($base + '.vtt') }
+            # MKV sources are analyzed/encoded directly. External subtitles are therefore not
+            # imported or deleted as part of the MKV-source workflow. Existing tracks remain intact.
+            if ($video.Extension.ToLowerInvariant() -ne '.mkv') {
+                if (Test-Path -LiteralPath ($base + '.srt') -PathType Leaf) { $subtitle = Get-Item -LiteralPath ($base + '.srt') }
+                elseif (Test-Path -LiteralPath ($base + '.vtt') -PathType Leaf) { $subtitle = Get-Item -LiteralPath ($base + '.vtt') }
+            }
 
             $remoteSubtitle=''; $localSubtitle=''; $subtitleSize=0L; $subtitleModified=''
             if ($null -ne $subtitle) {
@@ -660,6 +677,13 @@ function Import-UncMediaFiles {
 
             # Vid återstart med färdig lokal MKV läses längden direkt från UNC-källan.
             $durationSource = if ($resumeExistingOutput) { $video.FullName } else { $localVideo }
+            $remoteOutputRelative=$outputRelative
+            if($video.Extension.ToLowerInvariant() -eq '.mkv' -and -not [bool]$DeleteUncAfterSuccess){
+                $remoteRelativeDir=Split-Path -Parent $relative
+                $remoteOutputName=$video.BaseName+'.mediaprep.mkv'
+                $remoteOutputRelative=if([string]::IsNullOrWhiteSpace($remoteRelativeDir)){$remoteOutputName}else{Join-Path $remoteRelativeDir $remoteOutputName}
+            }
+
             $records.Add([PSCustomObject][ordered]@{
                 RelativePath=$relative
                 RemoteVideo=$video.FullName
@@ -671,7 +695,7 @@ function Import-UncMediaFiles {
                 LocalVideo=$localVideoForRecord
                 LocalSubtitle=$localSubtitle
                 ExpectedOutput=$expectedOutput
-                RemoteOutput=(Join-Path $SourcePath $outputRelative)
+                RemoteOutput=(Join-Path $SourcePath $remoteOutputRelative)
                 RunId=$Script:RunId
                 OutputExistedBefore=[bool]$outputExistedBefore
                 OutputSizeBeforeBytes=[int64]$outputSizeBefore
@@ -842,6 +866,20 @@ function Copy-FinalOutputBackToUnc {
 
     if (-not (Test-Path -LiteralPath $localOutput -PathType Leaf)) { throw 'Den lokala slutliga MKV-filen saknas.' }
     $localInfo=Get-Item -LiteralPath $localOutput -ErrorAction Stop
+
+    # MKV input can publish back to the exact original UNC path. Before any
+    # replacement, verify that nobody changed that source after MediaPrep imported it.
+    $publishesOverSource=$false
+    try{
+        $publishesOverSource=[string]::Equals([IO.Path]::GetFullPath([string]$Record.RemoteVideo),[IO.Path]::GetFullPath($remoteOutput),[StringComparison]::OrdinalIgnoreCase)
+    }catch{$publishesOverSource=([string]$Record.RemoteVideo -ieq $remoteOutput)}
+    if($publishesOverSource -and (Test-Path -LiteralPath $remoteOutput -PathType Leaf)){
+        $currentRemote=Get-Item -LiteralPath $remoteOutput -ErrorAction Stop
+        if($currentRemote.Length -ne [int64]$Record.RemoteVideoSizeBytes -or $currentRemote.LastWriteTimeUtc.ToString('o') -ne [string]$Record.RemoteVideoModifiedUtc){
+            throw 'UNC-MKV-källan har ändrats sedan importen och ersätts därför inte.'
+        }
+    }
+
     $remoteFolder=Split-Path -Parent $remoteOutput
     if (-not (Test-Path -LiteralPath $remoteFolder -PathType Container)) {
         New-Item -Path $remoteFolder -ItemType Directory -Force | Out-Null
@@ -873,10 +911,16 @@ function Copy-FinalOutputBackToUnc {
 
         if (Test-Path -LiteralPath $remoteOutput -PathType Leaf) {
             $existing=Get-Item -LiteralPath $remoteOutput -ErrorAction Stop
-            if ($existing.Length -eq $localInfo.Length) {
+            $remoteIsSource=$false
+            try{
+                $remoteIsSource=[string]::Equals([IO.Path]::GetFullPath([string]$Record.RemoteVideo),[IO.Path]::GetFullPath($remoteOutput),[StringComparison]::OrdinalIgnoreCase)
+            }catch{$remoteIsSource=([string]$Record.RemoteVideo -ieq $remoteOutput)}
+            if ($existing.Length -eq $localInfo.Length -and -not $remoteIsSource) {
                 Remove-Item -LiteralPath $temporary -Force
             }
             else {
+                # When an MKV source publishes back to its original path, always perform
+                # the verified backup/swap even if the byte size happens to be unchanged.
                 $backup=$remoteOutput+'.mediaprep-backup'
                 Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
                 Move-Item -LiteralPath $remoteOutput -Destination $backup -Force
@@ -915,19 +959,32 @@ function Publish-UncResultsAndCleanup {
 
             if ($DeleteOriginals) {
                 $remote=[string]$record.RemoteVideo
-                if (-not (Test-Path -LiteralPath $remote -PathType Leaf)) { throw 'UNC-videofilen finns inte längre.' }
-                $remoteInfo=Get-Item -LiteralPath $remote -ErrorAction Stop
-                if ($remoteInfo.Length -ne [int64]$record.RemoteVideoSizeBytes -or $remoteInfo.LastWriteTimeUtc.ToString('o') -ne [string]$record.RemoteVideoModifiedUtc) { throw 'UNC-videofilen har ändrats sedan importen och raderas därför inte.' }
-                Remove-Item -LiteralPath $remote -Force -ErrorAction Stop;$deleted++
+                $sameRemotePath=$false
+                try{
+                    $sameRemotePath=[string]::Equals([IO.Path]::GetFullPath($remote),[IO.Path]::GetFullPath($remoteOutput),[StringComparison]::OrdinalIgnoreCase)
+                }catch{$sameRemotePath=($remote -ieq $remoteOutput)}
 
-                $remoteSubtitle=[string]$record.RemoteSubtitle
-                if (-not [string]::IsNullOrWhiteSpace($remoteSubtitle) -and (Test-Path -LiteralPath $remoteSubtitle -PathType Leaf)) {
-                    $subInfo=Get-Item -LiteralPath $remoteSubtitle -ErrorAction Stop
-                    if ($subInfo.Length -eq [int64]$record.RemoteSubtitleSizeBytes -and $subInfo.LastWriteTimeUtc.ToString('o') -eq [string]$record.RemoteSubtitleModifiedUtc) {
-                        Remove-Item -LiteralPath $remoteSubtitle -Force -ErrorAction Stop;$deleted++
-                    } else { Write-Status WARN ("UNC-undertexten ändrades och behölls: {0}" -f $remoteSubtitle) }
+                if($sameRemotePath){
+                    # MKV input: Copy-FinalOutputBackToUnc has already kept or atomically
+                    # replaced the original path with the verified final MKV. Deleting the
+                    # source here would delete the newly published output.
+                    Write-Status OK ("MKV-källan ersattes säkert av verifierad slutfil: {0}" -f $record.RelativePath)
                 }
-                Write-Status OK ("Tog bort gammal UNC-källa: {0}" -f $record.RelativePath)
+                else{
+                    if (-not (Test-Path -LiteralPath $remote -PathType Leaf)) { throw 'UNC-videofilen finns inte längre.' }
+                    $remoteInfo=Get-Item -LiteralPath $remote -ErrorAction Stop
+                    if ($remoteInfo.Length -ne [int64]$record.RemoteVideoSizeBytes -or $remoteInfo.LastWriteTimeUtc.ToString('o') -ne [string]$record.RemoteVideoModifiedUtc) { throw 'UNC-videofilen har ändrats sedan importen och raderas därför inte.' }
+                    Remove-Item -LiteralPath $remote -Force -ErrorAction Stop;$deleted++
+
+                    $remoteSubtitle=[string]$record.RemoteSubtitle
+                    if (-not [string]::IsNullOrWhiteSpace($remoteSubtitle) -and (Test-Path -LiteralPath $remoteSubtitle -PathType Leaf)) {
+                        $subInfo=Get-Item -LiteralPath $remoteSubtitle -ErrorAction Stop
+                        if ($subInfo.Length -eq [int64]$record.RemoteSubtitleSizeBytes -and $subInfo.LastWriteTimeUtc.ToString('o') -eq [string]$record.RemoteSubtitleModifiedUtc) {
+                            Remove-Item -LiteralPath $remoteSubtitle -Force -ErrorAction Stop;$deleted++
+                        } else { Write-Status WARN ("UNC-undertexten ändrades och behölls: {0}" -f $remoteSubtitle) }
+                    }
+                    Write-Status OK ("Tog bort gammal UNC-källa: {0}" -f $record.RelativePath)
+                }
             }
 
             $localOutput=[string]$record.ExpectedOutput
@@ -1116,7 +1173,7 @@ function Scan-MediaLibrary {
         [switch]$AllowEmptyIncludeList
     )
 
-    $extensions = @($Script:Config.SupportedVideoFormats | ForEach-Object { $_.ToString().ToLowerInvariant() })
+    $extensions = @($Script:SelectedVideoFormats)
 
     $scanParameters = @{
         LiteralPath = $Script:SourceFolder
@@ -1182,7 +1239,7 @@ function Scan-MediaLibrary {
                 Write-Status INFO 'All in one source files have already been processed. The empty source list is expected during the post-mux check.'
             }
             else {
-                throw 'All in one contains no existing TS, MP4, AVI, MPG or MPEG files to process.'
+                throw 'All in one contains no existing files matching the selected video formats.'
             }
         }
     }
@@ -1250,7 +1307,8 @@ function Scan-MediaLibrary {
 
             continue
         }
-        $subtitle = Find-SubtitleForVideo -VideoFile $video
+        $isMkvSource=($video.Extension.ToLowerInvariant() -eq '.mkv')
+        $subtitle = if($isMkvSource){$null}else{Find-SubtitleForVideo -VideoFile $video}
         $relativeDirectory = Split-Path -Parent $relativeVideo
         $outputDirectory = if ([string]::IsNullOrWhiteSpace($relativeDirectory)) {
             $Script:OutputFolder
@@ -1259,7 +1317,11 @@ function Scan-MediaLibrary {
             Join-Path $Script:OutputFolder $relativeDirectory
         }
         $outputFile = Join-Path $outputDirectory ($video.BaseName + '.mkv')
-        $action = Get-ActionState -VideoFile $video -SubtitleFile $subtitle -OutputFile $outputFile
+        $action = if($isMkvSource){
+            [PSCustomObject]@{NeedsProcessing=$true;Reason='MKV source selected: skip remux and continue directly to analysis/optional encoding'}
+        }else{
+            Get-ActionState -VideoFile $video -SubtitleFile $subtitle -OutputFile $outputFile
+        }
 
         $subtitlePath = $null
         $subtitleType = 'Ingen'
@@ -1274,6 +1336,7 @@ function Scan-MediaLibrary {
             RelativePath = $relativeVideo
             VideoFile = $video.FullName
             VideoExtension = $video.Extension.ToLowerInvariant()
+            ProcessingKind = if($isMkvSource){'DirectMkv'}else{'Mux'}
             VideoSizeBytes = [Int64]$video.Length
             VideoModifiedUtc = $video.LastWriteTimeUtc.ToString('o')
             Probe = $sourceProbe
@@ -1496,6 +1559,67 @@ function Remove-CompletedFileFromIncludeList {
     }
 }
 
+function Invoke-PrepareMkvItem {
+    param([Parameter(Mandatory=$true)][object]$Item)
+
+    $source=[string]$Item.VideoFile
+    $output=[string]$Item.OutputFile
+    $sourceFull=[IO.Path]::GetFullPath($source)
+    $outputFull=[IO.Path]::GetFullPath($output)
+    $samePath=[string]::Equals($sourceFull,$outputFull,[StringComparison]::OrdinalIgnoreCase)
+
+    try{
+        if(-not(Test-Path -LiteralPath $source -PathType Leaf)){throw 'MKV source file is missing.'}
+        $sourceInfo=Get-Item -LiteralPath $source -ErrorAction Stop
+        $sourceDuration=[double](Get-OptionalPropertyValue -Object $Item.Probe -Name 'DurationSeconds' -DefaultValue 0)
+        if($sourceDuration-le0){$sourceDuration=Get-MediaDurationSeconds -Path $source}
+
+        if($samePath){
+            return [PSCustomObject]@{Success=$true;Message='MKV source is already in the output folder; remux skipped.';DeletedFiles='';DeletedCount=0}
+        }
+
+        $outputDirectory=Split-Path -Parent $output
+        Ensure-Directory $outputDirectory
+
+        # Restart safety: if a complete/encoded MKV already exists, prefer it over overwriting it
+        # with the imported source. Validate duration before reusing it.
+        if(Test-Path -LiteralPath $output -PathType Leaf){
+            $outputInfo=Get-Item -LiteralPath $output -ErrorAction Stop
+            $outputDuration=Get-MediaDurationSeconds -Path $output
+            $allowed=[Math]::Max(5.0,$sourceDuration*0.02)
+            $outputIsCurrent=($outputInfo.LastWriteTimeUtc -ge $sourceInfo.LastWriteTimeUtc.AddSeconds(-2))
+            if($outputInfo.Length-ge1024 -and $outputIsCurrent -and $sourceDuration-gt0 -and $outputDuration-gt0 -and [Math]::Abs($sourceDuration-$outputDuration)-le$allowed){
+                Remove-Item -LiteralPath $source -Force -ErrorAction Stop
+                return [PSCustomObject]@{Success=$true;Message='Existing processed MKV was verified and reused; remux skipped.';DeletedFiles=$source;DeletedCount=1}
+            }
+        }
+
+        $temporary=$output+'.mediaprep-mkv-source'
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $source -Destination $temporary -Force -ErrorAction Stop
+        $copyInfo=Get-Item -LiteralPath $temporary -ErrorAction Stop
+        if($copyInfo.Length-ne$sourceInfo.Length){throw 'MKV source copy failed size verification.'}
+        $copyDuration=Get-MediaDurationSeconds -Path $temporary
+        if($sourceDuration-gt0 -and $copyDuration-gt0){
+            $allowed=[Math]::Max(5.0,$sourceDuration*0.02)
+            if([Math]::Abs($sourceDuration-$copyDuration)-gt$allowed){throw 'MKV source copy failed duration verification.'}
+        }elseif($copyDuration-le0){throw 'MKV source copy could not be verified with ffprobe.'}
+
+        if(Test-Path -LiteralPath $output -PathType Leaf){Remove-Item -LiteralPath $output -Force}
+        Move-Item -LiteralPath $temporary -Destination $output -Force
+        Remove-Item -LiteralPath $source -Force -ErrorAction Stop
+        return [PSCustomObject]@{Success=$true;Message='MKV source verified and staged directly for analysis/optional encoding; remux skipped.';DeletedFiles=$source;DeletedCount=1}
+    }
+    catch{
+        return [PSCustomObject]@{Success=$false;Message=$_.Exception.Message;DeletedFiles='';DeletedCount=0}
+    }
+    finally{
+        if(-not[string]::IsNullOrWhiteSpace($output)){
+            Remove-Item -LiteralPath ($output+'.mediaprep-mkv-source') -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-MuxQueue {
     param(
         [Parameter(Mandatory = $true)][object[]]$Items
@@ -1507,7 +1631,7 @@ function Invoke-MuxQueue {
     $started = Get-Date
 
     if ($total -eq 0) {
-        Write-Status OK 'Alla MKV-filer är redan aktuella. Ingen muxning behövs.'
+        Write-Status OK 'Alla valda filer är redan aktuella. Ingen förberedelse/muxning behövs.'
         return $results.ToArray()
     }
 
@@ -1523,13 +1647,17 @@ function Invoke-MuxQueue {
             $etaText = ([TimeSpan]::FromSeconds($remainingSeconds)).ToString('hh\:mm\:ss')
         }
 
-        Write-Progress -Activity 'MediaPrep muxar till MKV' -Status ("{0} av {1}: {2} | ETA {3}" -f ($i + 1), $total, $item.RelativePath, $etaText) -PercentComplete $percent
-        Write-Status INFO ("Muxar: {0}" -f $item.RelativePath)
+        $isDirectMkv=([string](Get-OptionalPropertyValue -Object $item -Name 'ProcessingKind' -DefaultValue 'Mux') -eq 'DirectMkv')
+        $activity=if($isDirectMkv){'MediaPrep förbereder MKV för analys'}else{'MediaPrep muxar till MKV'}
+        Write-Progress -Activity $activity -Status ("{0} av {1}: {2} | ETA {3}" -f ($i + 1), $total, $item.RelativePath, $etaText) -PercentComplete $percent
+        $queueMessage=if($isDirectMkv){"Förbereder MKV utan ommuxning: {0}" -f $item.RelativePath}else{"Muxar: {0}" -f $item.RelativePath}
+        Write-Status INFO $queueMessage
         $muxValues=@{MuxStarted=(Get-Date).ToUniversalTime().ToString('o')}
         if($item.PSObject.Properties['Probe'] -and $null -ne $item.Probe){$muxValues['Probe']=$item.Probe}
         Update-QueueDashboardItem -RelativePath ([string]$item.RelativePath) -QueueStage 3 -QueueStatus 'Muxing' -Values $muxValues
 
-        $result = @(Invoke-MuxItem -Item $item) |
+        $resultRaw=if($isDirectMkv){Invoke-PrepareMkvItem -Item $item}else{Invoke-MuxItem -Item $item}
+        $result = @($resultRaw) |
             Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'Success') } |
             Select-Object -Last 1
 
@@ -1566,7 +1694,7 @@ function Invoke-MuxQueue {
         })
     }
 
-    Write-Progress -Activity 'MediaPrep muxar till MKV' -Completed
+    Write-Progress -Activity 'MediaPrep muxar/förbereder MKV' -Completed
     Remove-EmptySourceFolders
     return $results.ToArray()
 }
@@ -2667,6 +2795,7 @@ function Show-Summary {
     $aviCount = @($Items | Where-Object { $_.VideoExtension -eq '.avi' }).Count
     $mpgCount = @($Items | Where-Object { $_.VideoExtension -eq '.mpg' }).Count
     $mpegCount = @($Items | Where-Object { $_.VideoExtension -eq '.mpeg' }).Count
+    $mkvCount = @($Items | Where-Object { $_.VideoExtension -eq '.mkv' }).Count
     $srtCount = @($Items | Where-Object { $_.SubtitleType -eq 'SRT' }).Count
     $vttCount = @($Items | Where-Object { $_.SubtitleType -eq 'VTT' }).Count
     $noSubtitle = @($Items | Where-Object { $_.SubtitleType -eq 'Ingen' }).Count
@@ -2683,6 +2812,7 @@ function Show-Summary {
     Write-Host (' AVI......................: {0}' -f $aviCount)
     Write-Host (' MPG......................: {0}' -f $mpgCount)
     Write-Host (' MPEG.....................: {0}' -f $mpegCount)
+    Write-Host (' MKV......................: {0}' -f $mkvCount)
     Write-Host ''
     Write-Host (' Med SRT..................: {0}' -f $srtCount)
     Write-Host (' Med VTT..................: {0}' -f $vttCount)
@@ -2747,7 +2877,7 @@ if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID=
     }
     if (-not $AnalyzeOnly -and -not $EncodeOnly) {
         Write-Host ''
-        Write-Status INFO 'Söker rekursivt efter .ts, .mp4, .avi, .mpg och .mpeg...'
+        Write-Status INFO ('Söker rekursivt efter valda format: {0}...' -f (($Script:SelectedVideoFormats | ForEach-Object {$_.ToUpperInvariant()}) -join ', '))
         if ($ImportFromUnc -and @($currentQueueSourcePaths).Count -eq 0) {
             Write-Status INFO 'Aktuell UNC-kö har inga lokala källfiler att muxa. Fortsätter med befintliga MKV-resultat för just denna kö.'
             $items=@()
