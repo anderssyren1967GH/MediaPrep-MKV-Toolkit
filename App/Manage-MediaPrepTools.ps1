@@ -22,8 +22,9 @@ $EncoderTestStatus=Join-Path $DataFolder 'encoder-test-status.json'
 foreach($folder in @($DataFolder,$Downloads,$ToolsRoot,$BackupRoot,$ProgramBackupRoot)){if(-not(Test-Path -LiteralPath $folder)){New-Item -ItemType Directory -Force -Path $folder|Out-Null}}
 
 function Is-Swedish {
-    if($Language -eq 'sv'){return $true}
-    if($Language -eq 'en'){return $false}
+    $languageValue=[string]$Language
+    if($languageValue -match '^(?i:sv|sv-SE|swedish|svenska)$'){return $true}
+    if($languageValue -match '^(?i:en|en-US|english)$'){return $false}
     return ([Globalization.CultureInfo]::CurrentUICulture.Name -like 'sv*')
 }
 $sv=Is-Swedish

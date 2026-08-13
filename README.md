@@ -2,7 +2,7 @@
 
 PowerShell toolkit for preparing, muxing, analyzing, organizing, and optionally re-encoding video files to MKV.
 
-**Current release: 0.11.52**
+**Current release: 0.11.53**
 
 [Download the latest packaged release](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases/latest)
 
@@ -151,7 +151,7 @@ NVIDIA capability checks include:
 - Surfaces 8
 - Multipass qres
 
-Capability and benchmark results are stored under `Data`. A new CPU/GPU verification is required when the relevant FFmpeg build, GPU, or graphics driver changes.
+Capability and benchmark results are stored under `Data`. The latest checked CPU/GPU hardware summary is also stored in `Data\mediaprep.preferences.json` and is reused during normal Start Center startup when it belongs to the current computer. This avoids repeated Windows CIM/WMI hardware discovery for information that rarely changes. **Refresh hardware** or **Check CPU/GPU** updates the saved hardware snapshot. Queue start still performs a fresh CPU/GPU/driver and FFmpeg signature validation before processing begins, so cached display information does not bypass encoder safety checks.
 
 ## Queue processing
 
@@ -252,6 +252,10 @@ MediaPrep updates replace program files only. Existing `Data`, queue state, stat
 
 The Start Center can display MediaPrep-started process names and process IDs (PIDs). This makes it easier to identify a remaining PowerShell, FFmpeg, MKVToolNix, queue-host, or related child process if a processing session is interrupted or the interface is closed unexpectedly.
 
+Basic startup diagnostics and early-failure tracing are written to `Loggar\MediaPrep-Startup.log`. When **Verbose logging** is enabled and MediaPrep is restarted, a separate timestamped `Loggar\MediaPrep-Startup_YYYY-MM-DD_HH-mm-ss.log` is retained with the full fine-grained timing trace. The verbose startup log records real timestamps, elapsed milliseconds, and `Start`/`End` duration markers for initialization stages such as encoder refresh, external-tool version checks, process discovery, path checks, theming, and settings synchronization. Detailed timing markers are intentionally kept out of the basic startup log, making the timestamped verbose logs suitable for comparison across machines and across older/newer starts.
+
+Verbose startup timing also records whether the CPU/GPU snapshot came from saved preferences, current-session memory, or a fresh Windows CIM read. This makes performance logs useful for comparing normal cached starts with deliberate hardware refreshes.
+
 ## Themes and language
 
 Available interface themes include:
@@ -267,9 +271,13 @@ Language files are stored under:
 
 ```text
 Languages\
+    mediaprep.en-US.json
+    mediaprep.sv-SE.json
 ```
 
-The current distribution includes Swedish and English language files.
+Language resources use BCP-47 culture names and JSON. The current distribution includes English (`en-US`) and Swedish (`sv-SE`). **System default** resolves the Windows UI culture to an installed resource; if the exact regional culture is not installed, MediaPrep first tries an installed resource for the same language and finally falls back to `en-US`.
+
+Each language file declares `SchemaVersion`, `LanguageFileVersion`, `Culture`, and its native display name. MediaPrep validates the schema before loading the resource. `en-US` is the authoritative fallback for missing keys or broken format placeholders, so an older same-schema translation cannot crash the application simply because a newer text key is absent. Additional valid `mediaprep.<culture>.json` files can be discovered automatically by the language selector.
 
 ## Installation
 
@@ -451,3 +459,32 @@ Detailed release history is available in [CHANGELOG.md](CHANGELOG.md).
 ## Author
 
 Created by **Anders Syrén**.
+
+### 0.11.53 startup and dashboard behavior
+
+- Start Center shows the MediaPrep splash screen during startup and keeps it visible for about one second after the main window appears.
+- Verbose logging writes detailed startup timing for troubleshooting slow startup.
+- CPU/GPU summary data can be reused from verified preferences to avoid unnecessary repeated hardware discovery.
+- When the user explicitly closes Start Center, Start Center closes the queue statistics window as UI cleanup; the independent queue process is not terminated. If Start Center crashes or is terminated unexpectedly, the queue statistics window remains available so a running queue can still be monitored.
+- A deliberate MediaPrep update also closes Dashboard windows for the same installation before activation.
+
+### Encoder preference persistence
+
+CPU/libx265 is used only as the first-run default when no encoder preference exists. Once a verified encoder is selected by the user, `SelectedEncoderId` is preserved across normal restarts and MediaPrep updates. Release ZIP packages do not overwrite an existing `Data\mediaprep.preferences.json` or `Data\config.json`; Start Center creates these files automatically on first launch when they are missing.
+
+### 0.11.53 localization
+
+Runtime console output, Queue Dashboard text, recovery dialogs, and saved-queue dialogs use the same locale-based language resources as Start Center. The selector has three modes but only two built-in translation resources: **System default** resolves Windows UI culture, **English** forces `en-US`, and **Svenska** forces `sv-SE`.
+
+Language resources are locale-named JSON files with schema/version metadata:
+
+```text
+Languages\mediaprep.en-US.json
+Languages\mediaprep.sv-SE.json
+```
+
+Additional valid cultures can be discovered automatically. `en-US` is the safe master fallback for missing or malformed translated strings.
+
+### 0.11.53 update safety
+
+MediaPrep checks for an active queue/media worker immediately before launching the updater. The updater repeats the check after Start Center exits and before changing any program files. If work is active, the update is cancelled without stopping the queue or closing its Dashboard.

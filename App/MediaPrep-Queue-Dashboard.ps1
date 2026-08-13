@@ -44,6 +44,92 @@ $unprocessedFolder=Join-Path $Root 'UnProcessed'
 $tempFolder=Join-Path $data 'Temp'
 $script:QueueConsoleVisible=$false
 $script:MissingJsonLogged=@{}
+$script:LanguageSchemaVersion=1
+$script:RequiredLanguageFileVersion='1.6.0'
+$script:FallbackLanguageCulture='en-US'
+$script:LanguageBase=[pscustomobject]@{}
+$script:L=[pscustomobject]@{}
+$script:ResolvedLanguageCode='en-US'
+$script:LanguageFileIsCurrent=$false
+function Get-LanguageProperty([object]$Object,[string]$Name,$Default=$null){
+    if($null-eq$Object){return $Default};$p=$Object.PSObject.Properties[$Name];if($null-eq$p){return $Default};return $p.Value
+}
+function Normalize-LanguagePreference([string]$Code){
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'};$value=$Code.Trim()
+    switch($value.ToLowerInvariant()){
+        'system'{return 'system'}
+        'default'{return 'system'}
+        'en'{return 'en-US'}
+        'english'{return 'en-US'}
+        'en-us'{return 'en-US'}
+        'sv'{return 'sv-SE'}
+        'swedish'{return 'sv-SE'}
+        'svenska'{return 'sv-SE'}
+        'sv-se'{return 'sv-SE'}
+    }
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($value)).Name}catch{return $value}
+}
+function Get-LanguagePath([string]$Culture){return(Join-Path (Join-Path $Root 'Languages') ("mediaprep.{0}.json" -f $Culture))}
+function Read-LanguageDocument([string]$Path){
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $null}
+    try{$doc=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json}catch{return $null}
+    if($null-eq$doc){return $null}
+    try{$schema=[int](Get-LanguageProperty $doc 'SchemaVersion' -1)}catch{return $null}
+    if($schema-ne$script:LanguageSchemaVersion){return $null}
+    if([string]::IsNullOrWhiteSpace([string](Get-LanguageProperty $doc 'Culture' '')) -or [string]::IsNullOrWhiteSpace([string](Get-LanguageProperty $doc 'LanguageFileVersion' ''))){return $null}
+    return $doc
+}
+function Get-InstalledLanguageDocuments{
+    $result=New-Object System.Collections.Generic.List[object];$folder=Join-Path $Root 'Languages'
+    foreach($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+        $doc=Read-LanguageDocument $file.FullName;if($null-eq$doc){continue}
+        $culture=[string](Get-LanguageProperty $doc 'Culture' '');if([string]::IsNullOrWhiteSpace($culture)){continue}
+        $result.Add([pscustomobject]@{Path=$file.FullName;Culture=$culture;Document=$doc})
+    }
+    return @($result.ToArray())
+}
+function Get-SystemLanguageCode{
+    $installed=@(Get-InstalledLanguageDocuments);$culture=[Globalization.CultureInfo]::CurrentUICulture
+    foreach($entry in $installed){if([string]$entry.Culture -ieq $culture.Name){return [string]$entry.Culture}}
+    foreach($entry in $installed){
+        try{$c=[Globalization.CultureInfo]::GetCultureInfo([string]$entry.Culture);if($c.TwoLetterISOLanguageName -ieq $culture.TwoLetterISOLanguageName){return [string]$entry.Culture}}catch{}
+    }
+    return $script:FallbackLanguageCulture
+}
+function Initialize-DashboardLanguage{
+    $requested='system'
+    foreach($prefPath in @((Join-Path $data 'mediaprep.preferences.json'),(Join-Path $data 'config.json'))){
+        if(-not(Test-Path -LiteralPath $prefPath -PathType Leaf)){continue}
+        try{$o=Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8|ConvertFrom-Json;if($o.PSObject.Properties['Language'] -and $o.Language){$requested=[string]$o.Language;break}}catch{}
+    }
+    $requested=Normalize-LanguagePreference $requested
+    $baseDoc=Read-LanguageDocument (Get-LanguagePath $script:FallbackLanguageCulture)
+    if($null-eq$baseDoc){$baseDoc=[pscustomobject]@{}}
+    $script:LanguageBase=$baseDoc
+    $resolved=if($requested-eq'system'){Get-SystemLanguageCode}else{$requested}
+    $selected=Read-LanguageDocument (Get-LanguagePath $resolved)
+    if($null-eq$selected){$resolved=$script:FallbackLanguageCulture;$selected=$baseDoc}
+    if($null-eq$selected){$selected=[pscustomobject]@{}}
+    $script:L=$selected;$script:ResolvedLanguageCode=$resolved
+    $script:LanguageFileIsCurrent=([string](Get-LanguageProperty $selected 'LanguageFileVersion' '') -eq $script:RequiredLanguageFileVersion)
+}
+function T {
+    param([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@())
+    $bp = if($script:LanguageBase){$script:LanguageBase.PSObject.Properties[$Key]}else{$null}
+    $base = if($bp -and -not [string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p = if($script:L){$script:L.PSObject.Properties[$Key]}else{$null}
+    $v = if($p -and -not [string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $a = @($FormatArgs)
+    if($a.Count -gt 0){
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$v,$a) } catch {}
+        if($v -ne $base){
+            try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$a) } catch {}
+        }
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$Fallback,$a) } catch { return $Fallback }
+    }
+    return $v
+}
+Initialize-DashboardLanguage
 
 $logFolder=Join-Path $Root 'Loggar'
 $dashboardLogPath=$null
@@ -63,21 +149,21 @@ Write-DashboardLog 'INFO' ("Dashboard start. Root='{0}' PID={1}" -f $Root,$PID)
 
 function Read-Json([string]$p,[object]$fallback){
     if(-not(Test-Path -LiteralPath $p -PathType Leaf)){
-        # Under uppstart finns vissa statistikfiler ännu inte. Logga detta bara
-        # en gång per fil i stället för varje sekund.
+        # Some statistics files do not exist yet during startup. Log this only
+        # once per file instead of once per second.
         if(-not $script:MissingJsonLogged.ContainsKey($p)){
-            Write-DashboardLog 'VERBOSE' ("JSON saknas ännu: {0}" -f $p)
+            Write-DashboardLog 'VERBOSE' ("JSON does not exist yet: {0}" -f $p)
             $script:MissingJsonLogged[$p]=$true
         }
         return $fallback
     }
     elseif($script:MissingJsonLogged.ContainsKey($p)){
         $script:MissingJsonLogged.Remove($p)
-        Write-DashboardLog 'VERBOSE' ("JSON finns nu: {0}" -f $p)
+        Write-DashboardLog 'VERBOSE' ("JSON is now available: {0}" -f $p)
     }
     try{return (Get-Content -LiteralPath $p -Raw -Encoding UTF8|ConvertFrom-Json)}
     catch{
-        Write-DashboardLog 'ERROR' ("Kunde inte läsa JSON '{0}': {1}" -f $p,$_.Exception.Message)
+        Write-DashboardLog 'ERROR' ("Could not read JSON '{0}': {1}" -f $p,$_.Exception.Message)
         return $fallback
     }
 }
@@ -91,7 +177,7 @@ function Save-JsonAtomic([string]$Path,[object]$Value){
         Move-Item -LiteralPath $tmp -Destination $Path -Force
         return $true
     }catch{
-        Write-DashboardLog 'ERROR' ("Kunde inte spara JSON '{0}': {1}" -f $Path,$_.Exception.Message)
+        Write-DashboardLog 'ERROR' ("Could not save JSON '{0}': {1}" -f $Path,$_.Exception.Message)
         return $false
     }
 }
@@ -149,27 +235,27 @@ function Get-ReviewPath($Context){
 }
 function Review-SelectedError{
     $ctx=Get-SelectedErrorContext
-    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show('Markera först en fil i felkön.','MediaPrep')|Out-Null;return}
+    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show((T 'DashboardNoErrorSelection' 'Select a file in the error queue first.'),'MediaPrep')|Out-Null;return}
     $path=Get-ReviewPath $ctx
     if([string]::IsNullOrWhiteSpace($path)){
         [Windows.Forms.MessageBox]::Show('Ingen lokal MKV hittades att granska.','MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         return
     }
-    try{Start-Process -FilePath $path;Write-DashboardLog 'INFO' ("Granska: {0}" -f $path)}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep')|Out-Null}
+    try{Start-Process -FilePath $path;Write-DashboardLog 'INFO' ("Review: {0}" -f $path)}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep')|Out-Null}
 }
 function Continue-SelectedError{
     $ctx=Get-SelectedErrorContext
-    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show('Markera först en fil i felkön.','MediaPrep')|Out-Null;return}
+    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show((T 'DashboardNoErrorSelection' 'Select a file in the error queue first.'),'MediaPrep')|Out-Null;return}
     $rel=[string]$ctx.RelativePath
     $doc=Read-Json $inventoryPath $null
     $it=Find-InventoryItem $doc $rel
-    if($null-eq$it){[Windows.Forms.MessageBox]::Show('Köposten kunde inte hittas i inventeringen.','MediaPrep')|Out-Null;return}
+    if($null-eq$it){[Windows.Forms.MessageBox]::Show((T 'DashboardInventoryItemMissing' 'The queue item could not be found in the inventory.'),'MediaPrep')|Out-Null;return}
     $err=$ctx.ErrorRecord
     $localOut=[string](Get-ObjectProperty $it 'LocalOutput' '')
     $localSrc=[string](Get-ObjectProperty $it 'LocalSource' '')
     $errorFile=if($null-ne$err){[string](Get-ObjectProperty $err 'ErrorPath' '')}else{''}
 
-    # Om felkön faktiskt innehåller filen, återställ den först till sin normala lokala plats.
+    # If the error queue actually contains the file, restore it to its normal local path first.
     if(-not[string]::IsNullOrWhiteSpace($errorFile) -and (Test-Path -LiteralPath $errorFile -PathType Leaf)){
         $ext=[IO.Path]::GetExtension($errorFile)
         $dest=if($ext -ieq '.mkv'){$localOut}else{$localSrc}
@@ -188,13 +274,13 @@ function Continue-SelectedError{
     if(-not[string]::IsNullOrWhiteSpace($localOut) -and (Test-Path -LiteralPath $localOut -PathType Leaf)){
         $codec=Get-VideoCodec $localOut
         if([string]::IsNullOrWhiteSpace($codec)){
-            [Windows.Forms.MessageBox]::Show('Den lokala MKV-filen kunde inte verifieras med ffprobe. Filen lämnas kvar i felkön.','MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            [Windows.Forms.MessageBox]::Show((T 'DashboardMkvVerifyFailed' 'The local MKV could not be verified with ffprobe. The file remains in the error queue.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
             return
         }
         $fi=Get-Item -LiteralPath $localOut -ErrorAction SilentlyContinue
         if($null-ne$fi){$final=[int64]$fi.Length}
         if($errorKind -eq 'Publish' -or $previousStage -ge 8){
-            # Filen är redan färdig lokalt; endast återflyttningen misslyckades.
+            # The file is already complete locally; only the return copy failed.
             $stage=8;$qstatus='WaitingForReturn'
         }elseif($codec -eq 'hevc'){
             $stage=7;$qstatus='Encoded';Set-ObjectProperty $it 'EncodedSize' $final
@@ -218,7 +304,7 @@ function Continue-SelectedError{
     if($doc.PSObject.Properties['updatedUtc']){$doc.updatedUtc=(Get-Date).ToUniversalTime().ToString('o')}
     if(-not(Save-JsonAtomic $inventoryPath $doc)){return}
     Remove-ErrorRecord $rel
-    Write-DashboardLog 'INFO' ("Fortsätt manuellt: {0}; nytt steg={1} {2}" -f $rel,$stage,$qstatus)
+    Write-DashboardLog 'INFO' ("Manual continue: {0}; new stage={1} {2}" -f $rel,$stage,$qstatus)
     Refresh-Dashboard
 }
 function Test-IsSafeLocalPath([string]$Path){
@@ -228,9 +314,9 @@ function Test-IsSafeLocalPath([string]$Path){
 }
 function Remove-SelectedError{
     $ctx=Get-SelectedErrorContext
-    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show('Markera först en fil i felkön.','MediaPrep')|Out-Null;return}
+    if($null-eq$ctx){[Windows.Forms.MessageBox]::Show((T 'DashboardNoErrorSelection' 'Select a file in the error queue first.'),'MediaPrep')|Out-Null;return}
     $rel=[string]$ctx.RelativePath
-    if([Windows.Forms.MessageBox]::Show("Ta bort '$rel' från felkön och hela MediaPrep-kön?`r`n`r`nLokala arbets-/tempfiler tas bort. Originalet på UNC lämnas orört.",'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning) -ne [Windows.Forms.DialogResult]::Yes){return}
+    if([Windows.Forms.MessageBox]::Show((T 'DashboardConfirmRemove' "Remove '{0}' from the error queue and the entire MediaPrep queue?`r`n`r`nLocal work/temp files are removed. The UNC original is left untouched." @($rel)),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning) -ne [Windows.Forms.DialogResult]::Yes){return}
     $doc=Read-Json $inventoryPath $null
     $it=Find-InventoryItem $doc $rel
     $paths=New-Object System.Collections.Generic.List[string]
@@ -239,9 +325,9 @@ function Remove-SelectedError{
     }
     if($null-ne$ctx.ErrorRecord){$v=[string](Get-ObjectProperty $ctx.ErrorRecord 'ErrorPath' '');if(-not[string]::IsNullOrWhiteSpace($v)){$paths.Add($v)}}
     foreach($fp in $paths){
-        if((Test-IsSafeLocalPath $fp) -and (Test-Path -LiteralPath $fp -PathType Leaf)){try{Remove-Item -LiteralPath $fp -Force;Write-DashboardLog 'INFO' ("Tog bort lokal fil: {0}" -f $fp)}catch{Write-DashboardLog 'ERROR' $_.Exception.Message}}
+        if((Test-IsSafeLocalPath $fp) -and (Test-Path -LiteralPath $fp -PathType Leaf)){try{Remove-Item -LiteralPath $fp -Force;Write-DashboardLog 'INFO' ("Removed local file: {0}" -f $fp)}catch{Write-DashboardLog 'ERROR' $_.Exception.Message}}
     }
-    # Rensa kända temporära filer/mappar med samma basnamn.
+    # Remove known temporary files/folders with the same base name.
     $stem=[IO.Path]::GetFileNameWithoutExtension($rel)
     if(Test-Path -LiteralPath $tempFolder -PathType Container){
         try{
@@ -256,7 +342,7 @@ function Remove-SelectedError{
         [void](Save-JsonAtomic $inventoryPath $doc)
     }
     Remove-ErrorRecord $rel
-    Write-DashboardLog 'WARN' ("Manuellt borttagen ur hela kön: {0}. UNC-original berördes inte." -f $rel)
+    Write-DashboardLog 'WARN' ("Manually removed from the complete queue: {0}. The UNC original was not changed." -f $rel)
     Refresh-Dashboard
 }
 
@@ -309,7 +395,7 @@ function Apply-DashboardTheme([Windows.Forms.Control]$Control){if($null-eq$Contr
 
 $script:DashboardTheme=Get-DashboardTheme
 $form=New-Object Windows.Forms.Form
-$form.Text='MediaPrep - Köstatistik'
+$form.Text=(T 'DashboardWindowTitle' 'MediaPrep - Queue statistics')
 $form.StartPosition='CenterScreen'
 $form.Size=New-Object Drawing.Size(1080,700)
 $form.MinimumSize=New-Object Drawing.Size(900,600)
@@ -317,21 +403,21 @@ $form.Font=New-Object Drawing.Font('Segoe UI',9)
 $form.AutoScaleMode=[Windows.Forms.AutoScaleMode]::Dpi
 
 $title=New-Object Windows.Forms.Label
-$title.Text='MediaPrep kömonitor'
+$title.Text=(T 'DashboardMonitorTitle' 'MediaPrep queue monitor')
 $title.Font=New-Object Drawing.Font('Segoe UI',15,[Drawing.FontStyle]::Bold)
 $title.AutoSize=$true;$title.Location=New-Object Drawing.Point(18,14);$form.Controls.Add($title)
 
 $stats=New-Object Windows.Forms.GroupBox
-$stats.Text='Aktuell statistik';$stats.Location=New-Object Drawing.Point(18,52);$stats.Size=New-Object Drawing.Size(1025,105);$stats.Anchor='Top,Left,Right';$form.Controls.Add($stats)
+$stats.Text=(T 'DashboardCurrentStatistics' 'Current statistics');$stats.Location=New-Object Drawing.Point(18,52);$stats.Size=New-Object Drawing.Size(1025,105);$stats.Anchor='Top,Left,Right';$form.Controls.Add($stats)
 $labels=@{}
 $defs=@(
-    @('remaining','Kvar i kön',15),
-    @('processed','Bearbetade',155),
-    @('size','Storlek kvar',305),
-    @('subs','Undertexter kvar',455),
-    @('readyReturn','Klara för flytt',610),
-    @('completed','Klara',770),
-    @('errors','Fel',900)
+    @('remaining',(T 'DashboardRemaining' 'Remaining in queue'),15),
+    @('processed',(T 'DashboardProcessed' 'Processed'),155),
+    @('size',(T 'DashboardRemainingSize' 'Size remaining'),305),
+    @('subs',(T 'DashboardSubtitlesRemaining' 'Subtitles remaining'),455),
+    @('readyReturn',(T 'DashboardReadyMove' 'Ready to move'),610),
+    @('completed',(T 'DashboardCompleted' 'Completed'),770),
+    @('errors',(T 'DashboardErrors' 'Errors'),900)
 )
 foreach($d in $defs){
     $l=New-Object Windows.Forms.Label;$l.Text=$d[1];$l.AutoSize=$true;$l.Location=New-Object Drawing.Point($d[2],24);$stats.Controls.Add($l)
@@ -342,34 +428,34 @@ $progress=New-Object Windows.Forms.ProgressBar;$progress.Location=New-Object Dra
 $tabs=New-Object Windows.Forms.TabControl
 $tabs.Location=New-Object Drawing.Point(18,170);$tabs.Size=New-Object Drawing.Size(1025,430);$tabs.Anchor='Top,Bottom,Left,Right';$form.Controls.Add($tabs)
 
-$tabQueue=New-Object Windows.Forms.TabPage;$tabQueue.Text='Kvar i kön'
-$tabErr=New-Object Windows.Forms.TabPage;$tabErr.Text='Felkö'
-$tabRun=New-Object Windows.Forms.TabPage;$tabRun.Text='Körningsstatistik'
-$tabSlow=New-Object Windows.Forms.TabPage;$tabSlow.Text='Långsamma kopieringar'
+$tabQueue=New-Object Windows.Forms.TabPage;$tabQueue.Text=(T 'DashboardTabRemaining' 'Remaining in queue')
+$tabErr=New-Object Windows.Forms.TabPage;$tabErr.Text=(T 'DashboardTabError' 'Error queue')
+$tabRun=New-Object Windows.Forms.TabPage;$tabRun.Text=(T 'DashboardTabRun' 'Run statistics')
+$tabSlow=New-Object Windows.Forms.TabPage;$tabSlow.Text=(T 'DashboardTabSlow' 'Slow copies')
 $tabs.TabPages.AddRange(@($tabQueue,$tabErr,$tabRun,$tabSlow))
 
 $qgrid=New-Object Windows.Forms.DataGridView;$qgrid.Dock='Fill';$qgrid.ReadOnly=$true;$qgrid.AllowUserToAddRows=$false;$qgrid.RowHeadersVisible=$false;$qgrid.SelectionMode='FullRowSelect';$qgrid.AutoSizeColumnsMode=[Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
-Add-Col $qgrid 'File' 'Fil' 310;Add-Col $qgrid 'Size' 'Storlek' 95;Add-Col $qgrid 'Subs' 'Text' 60;Add-Col $qgrid 'Status' 'Status' 150;Add-Col $qgrid 'Path' 'Sökväg' 360
+Add-Col $qgrid 'File' (T 'DashboardColumnFile' 'File') 310;Add-Col $qgrid 'Size' (T 'DashboardColumnSize' 'Size') 95;Add-Col $qgrid 'Subs' (T 'DashboardColumnSubs' 'Subs') 60;Add-Col $qgrid 'Status' (T 'DashboardColumnStatus' 'Status') 150;Add-Col $qgrid 'Path' (T 'DashboardColumnPath' 'Path') 360
 $tabQueue.Controls.Add($qgrid)
 
 $ePanel=New-Object Windows.Forms.Panel;$ePanel.Dock='Fill';$tabErr.Controls.Add($ePanel)
 $errorButtons=New-Object Windows.Forms.FlowLayoutPanel;$errorButtons.Dock='Bottom';$errorButtons.Height=52;$errorButtons.Padding=New-Object Windows.Forms.Padding(8,8,8,6);$errorButtons.WrapContents=$false;$ePanel.Controls.Add($errorButtons)
 $egrid=New-Object Windows.Forms.DataGridView;$egrid.Dock='Fill';$egrid.ReadOnly=$true;$egrid.AllowUserToAddRows=$false;$egrid.RowHeadersVisible=$false;$egrid.SelectionMode='FullRowSelect';$egrid.AutoSizeColumnsMode=[Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
-Add-Col $egrid 'File' 'Fil' 270;Add-Col $egrid 'Reason' 'Felorsak' 360;Add-Col $egrid 'Path' 'Error-sökväg' 370;$ePanel.Controls.Add($egrid);$egrid.BringToFront();$errorButtons.BringToFront()
-$bReview=New-Object Windows.Forms.Button;$bReview.Text='Granska';$bReview.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bReview)
-$bContinue=New-Object Windows.Forms.Button;$bContinue.Text='Fortsätt';$bContinue.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bContinue)
-$bRemoveError=New-Object Windows.Forms.Button;$bRemoveError.Text='Ta bort';$bRemoveError.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bRemoveError)
-$bProcess=New-Object Windows.Forms.Button;$bProcess.Text='Bearbeta felkön';$bProcess.Size=New-Object Drawing.Size(170,32);$errorButtons.Controls.Add($bProcess)
+Add-Col $egrid 'File' (T 'DashboardColumnFile' 'File') 270;Add-Col $egrid 'Reason' (T 'DashboardColumnReason' 'Error reason') 360;Add-Col $egrid 'Path' (T 'DashboardColumnErrorPath' 'Error path') 370;$ePanel.Controls.Add($egrid);$egrid.BringToFront();$errorButtons.BringToFront()
+$bReview=New-Object Windows.Forms.Button;$bReview.Text=(T 'DashboardReview' 'Review');$bReview.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bReview)
+$bContinue=New-Object Windows.Forms.Button;$bContinue.Text=(T 'DashboardContinue' 'Continue');$bContinue.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bContinue)
+$bRemoveError=New-Object Windows.Forms.Button;$bRemoveError.Text=(T 'DashboardRemove' 'Remove');$bRemoveError.Size=New-Object Drawing.Size(120,32);$errorButtons.Controls.Add($bRemoveError)
+$bProcess=New-Object Windows.Forms.Button;$bProcess.Text=(T 'DashboardProcessErrorQueue' 'Process error queue');$bProcess.Size=New-Object Drawing.Size(170,32);$errorButtons.Controls.Add($bProcess)
 
 $runBox=New-Object Windows.Forms.RichTextBox;$runBox.Dock='Fill';$runBox.ReadOnly=$true;$runBox.Font=New-Object Drawing.Font('Consolas',10);$tabRun.Controls.Add($runBox)
 $sgrid=New-Object Windows.Forms.DataGridView;$sgrid.Dock='Fill';$sgrid.ReadOnly=$true;$sgrid.AllowUserToAddRows=$false;$sgrid.RowHeadersVisible=$false;$sgrid.SelectionMode='FullRowSelect';$sgrid.AutoSizeColumnsMode=[Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
-Add-Col $sgrid 'File' 'Fil' 320;Add-Col $sgrid 'Dir' 'Riktning' 105;Add-Col $sgrid 'Size' 'Storlek' 95;Add-Col $sgrid 'Rate' 'MB/s' 80;Add-Col $sgrid 'Time' 'Tid' 90;Add-Col $sgrid 'Started' 'Start' 160;$tabSlow.Controls.Add($sgrid)
+Add-Col $sgrid 'File' (T 'DashboardColumnFile' 'File') 320;Add-Col $sgrid 'Dir' (T 'DashboardDirection' 'Direction') 105;Add-Col $sgrid 'Size' (T 'DashboardColumnSize' 'Size') 95;Add-Col $sgrid 'Rate' 'MB/s' 80;Add-Col $sgrid 'Time' (T 'DashboardTime' 'Time') 90;Add-Col $sgrid 'Started' (T 'DashboardStarted' 'Start') 160;$tabSlow.Controls.Add($sgrid)
 
 $status=New-Object Windows.Forms.Label;$status.Location=New-Object Drawing.Point(18,612);$status.Size=New-Object Drawing.Size(620,26);$status.Anchor='Bottom,Left';$form.Controls.Add($status)
-$bDetails=New-Object Windows.Forms.Button;$bDetails.Text='Visa detaljer';$bDetails.Location=New-Object Drawing.Point(650,610);$bDetails.Size=New-Object Drawing.Size(105,30);$bDetails.Anchor='Bottom,Right';$form.Controls.Add($bDetails)
-$bLoadStats=New-Object Windows.Forms.Button;$bLoadStats.Text='Ladda statistik...';$bLoadStats.Location=New-Object Drawing.Point(762,610);$bLoadStats.Size=New-Object Drawing.Size(125,30);$bLoadStats.Anchor='Bottom,Right';$form.Controls.Add($bLoadStats)
-$bCurrentStats=New-Object Windows.Forms.Button;$bCurrentStats.Text='Aktuell';$bCurrentStats.Location=New-Object Drawing.Point(894,610);$bCurrentStats.Size=New-Object Drawing.Size(70,30);$bCurrentStats.Anchor='Bottom,Right';$form.Controls.Add($bCurrentStats)
-$bClose=New-Object Windows.Forms.Button;$bClose.Text='Stäng';$bClose.Location=New-Object Drawing.Point(971,610);$bClose.Size=New-Object Drawing.Size(70,30);$bClose.Anchor='Bottom,Right';$form.Controls.Add($bClose)
+$bDetails=New-Object Windows.Forms.Button;$bDetails.Text=(T 'DashboardShowDetails' 'Show details');$bDetails.Location=New-Object Drawing.Point(650,610);$bDetails.Size=New-Object Drawing.Size(105,30);$bDetails.Anchor='Bottom,Right';$form.Controls.Add($bDetails)
+$bLoadStats=New-Object Windows.Forms.Button;$bLoadStats.Text=(T 'DashboardLoadStatistics' 'Load statistics...');$bLoadStats.Location=New-Object Drawing.Point(762,610);$bLoadStats.Size=New-Object Drawing.Size(125,30);$bLoadStats.Anchor='Bottom,Right';$form.Controls.Add($bLoadStats)
+$bCurrentStats=New-Object Windows.Forms.Button;$bCurrentStats.Text=(T 'DashboardCurrent' 'Current');$bCurrentStats.Location=New-Object Drawing.Point(894,610);$bCurrentStats.Size=New-Object Drawing.Size(70,30);$bCurrentStats.Anchor='Bottom,Right';$form.Controls.Add($bCurrentStats)
+$bClose=New-Object Windows.Forms.Button;$bClose.Text=(T 'DashboardClose' 'Close');$bClose.Location=New-Object Drawing.Point(971,610);$bClose.Size=New-Object Drawing.Size(70,30);$bClose.Anchor='Bottom,Right';$form.Controls.Add($bClose)
 
 function Set-BottomButtonLayout {
     $gap=7
@@ -397,34 +483,34 @@ function Get-QueueConsoleHandle {
 function Toggle-QueueConsole {
     $hWnd=Get-QueueConsoleHandle
     if($hWnd -eq [IntPtr]::Zero){
-        [Windows.Forms.MessageBox]::Show('Det detaljerade köfönstret är inte aktivt ännu.','MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'DashboardDetailsNotActive' 'The detailed queue window is not active yet.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         return
     }
     if($script:QueueConsoleVisible){
         [void][MediaPrep.DashboardNative]::ShowWindow($hWnd,0)
         $script:QueueConsoleVisible=$false
-        $bDetails.Text='Visa detaljer'
-        Write-DashboardLog 'INFO' 'Detaljerat köfönster dolt.'
+        $bDetails.Text=(T 'DashboardShowDetails' 'Show details')
+        Write-DashboardLog 'INFO' 'Detailed queue window hidden.'
     }else{
         [void][MediaPrep.DashboardNative]::ShowWindow($hWnd,5)
         $script:QueueConsoleVisible=$true
-        $bDetails.Text='Dölj detaljer'
-        Write-DashboardLog 'INFO' 'Detaljerat köfönster visat.'
+        $bDetails.Text=(T 'DashboardHideDetails' 'Hide details')
+        Write-DashboardLog 'INFO' 'Detailed queue window shown.'
     }
 }
 
 function Get-StageText([int]$stage,[string]$fallback){
     switch($stage){
-        0{'Väntar'} 1{'Kopieras från UNC'} 2{'Lokal källa klar'} 3{'Muxning'} 4{'Muxad'}
-        5{'Analyserad'} 6{'NVENC'} 7{'Kodad'} 8{'Väntar återflytt'} 9{'Kopieras till UNC'}
-        10{'Klar'} 90{'Fel'} 91{'Felkön bearbetas'} 92{'Felkö misslyckades'}
-        default{if($fallback){$fallback}else{"Steg $stage"}}
+        0{T 'DashboardStageWaiting' 'Waiting'} 1{T 'DashboardStageCopyIn' 'Copying from UNC'} 2{T 'DashboardStageLocalReady' 'Local source ready'} 3{T 'DashboardStageMuxing' 'Muxing'} 4{T 'DashboardStageMuxed' 'Muxed'}
+        5{T 'DashboardStageAnalyzed' 'Analyzed'} 6{T 'DashboardStageEncoding' 'Encoding'} 7{T 'DashboardStageEncoded' 'Encoded'} 8{T 'DashboardStageWaitingReturn' 'Waiting to return'} 9{T 'DashboardStageCopyOut' 'Copying to UNC'}
+        10{T 'DashboardStageCompleted' 'Completed'} 90{T 'DashboardStageError' 'Error'} 91{T 'DashboardStageErrorQueue' 'Processing error queue'} 92{T 'DashboardStageErrorQueueFailed' 'Error queue failed'}
+        default{if($fallback){$fallback}else{T 'DashboardStageUnknown' 'Stage {0}' @($stage)}}
     }
 }
 function Set-GridLayout{
-    # AutoSizeColumnsMode=Fill kan successivt ändra FillWeight/kolumnbredder när
-    # Rows.Clear()/Rows.Add() körs varje sekund. Håll därför fasta bredder och
-    # låt endast sista sökvägskolumnen ta resterande utrymme.
+    # AutoSizeColumnsMode=Fill can gradually change FillWeight/column widths when
+    # Rows.Clear()/Rows.Add() runs every second. Keep fixed widths and allow only
+    # the final path column to consume the remaining space.
     try{
         $qFixed=310+95+60+150
         $qAvail=[Math]::Max(300,$qgrid.ClientSize.Width-$qFixed-25)
@@ -515,8 +601,8 @@ function Refresh-Dashboard{
         }
     }
 
-    # Bygg felvyn från både inventory-status och error-queue.json. Detta gör
-    # felkön synlig även om en äldre/extern statusuppdatering missat QueueStage.
+    # Build the error view from both inventory status and error-queue.json. This keeps
+    # the error queue visible even if an older/external status update missed QueueStage.
     $errorKeys=@{}
     foreach($e in $errs){
         $rel=[string](Get-ObjectProperty $e 'RelativePath' '')
@@ -557,7 +643,7 @@ function Refresh-Dashboard{
     $doneForProgress=$processed+$errorCount
     $progress.Value=if($total-gt 0){[Math]::Min(100,[int](100*$doneForProgress/$total))}else{0}
 
-    # Körningsstatistik baseras på hela Start Center-sessionen, inte på en enskild UNC-kö.
+    # Run statistics are based on the complete Start Center session, not a single UNC queue.
     $sessionFiles=New-Object System.Collections.Generic.List[object]
     $sessionQueueCount=0
     if($session -and $session.PSObject.Properties['Queues']){
@@ -591,29 +677,46 @@ function Refresh-Dashboard{
         $result=[string](Get-ObjectProperty $sf 'Result' '')
         if($result -eq 'Completed'){$sessionCompleted++}elseif($result -eq 'Error'){$sessionErrors++}
     }
-    # Huvudbaren visar hela MediaPrep-sessionen: klara filer / registrerade filer.
-    # När nya köer läggs till under samma session sjunker procenten naturligt tills de är färdiga.
+    # The main progress bar shows the complete MediaPrep session: completed files / registered files.
+    # When new queues are added during the same session, the percentage naturally drops until they finish.
     if($sessionFiles.Count -gt 0){$progress.Value=[Math]::Min(100,[Math]::Max(0,[int](100*$sessionCompleted/[double]$sessionFiles.Count)))}
     else{$progress.Value=0}
     $avgIn=if($inSec-gt 0){($inBytes/1MB)/$inSec}else{0};$avgOut=if($outSec-gt 0){($outBytes/1MB)/$outSec}else{0}
     [double]$saved=$sourceCompleted-$finalCompleted
     if($saved -lt 0){$saved=0.0}
     [double]$savedPct=if($sourceCompleted-gt 0){100.0*$saved/$sourceCompleted}else{0.0}
-    $started='-';$ended='-';$elapsed='00:00:00';$sessionStatus='Inte startad'
+    $started='-';$ended='-';$elapsed='00:00:00';$sessionStatus='NotStarted'
     if($session){
         $started=[string](Get-ObjectProperty $session 'StartedLocal' '');if([string]::IsNullOrWhiteSpace($started)){$started='-'}
-        $sessionStatus=[string](Get-ObjectProperty $session 'Status' 'NotStarted')
+        $sessionStatus=[string](Get-ObjectProperty $session 'Status' '')
+        # Older archived statistics did not always store a root Status value.
+        # Reconstruct a useful status from the durable file results instead of
+        # showing "Not started" for a completed archive.
+        if([string]::IsNullOrWhiteSpace($sessionStatus)){
+            if($sessionFiles.Count -gt 0 -and $sessionCompleted -ge $sessionFiles.Count){$sessionStatus='Completed'}
+            elseif($sessionErrors -gt 0){$sessionStatus='Error'}
+            elseif($sessionFiles.Count -gt 0){$sessionStatus='Stopped'}
+            else{$sessionStatus='NotStarted'}
+        }
         [double]$elapsedSeconds=[double](Get-ObjectProperty $session 'ActiveSeconds' (Get-ObjectProperty $session 'ElapsedSeconds' 0))
         if($sessionStatus -eq 'Running'){
             $activeUtc=[string](Get-ObjectProperty $session 'ActiveRunStartedUtc' '')
             if(-not[string]::IsNullOrWhiteSpace($activeUtc)){try{$elapsedSeconds += ((Get-Date).ToUniversalTime()-[datetime]::Parse($activeUtc).ToUniversalTime()).TotalSeconds}catch{}}
-            $ended='Pågår'
+            $ended=(T 'DashboardInProgress' 'In progress')
         } else {
             $ended=[string](Get-ObjectProperty $session 'EndedLocal' '');if([string]::IsNullOrWhiteSpace($ended)){$ended='-'}
         }
         if($elapsedSeconds -lt 0){$elapsedSeconds=0};$elapsed=[TimeSpan]::FromSeconds($elapsedSeconds).ToString('hh\:mm\:ss')
     }
-$runBox.Text=("SESSION`r`nStatus:                  {0}`r`nStartad:                 {1}`r`nAvslutad:                {2}`r`nKörtid:                  {3}`r`nKöer registrerade:       {4}`r`nFiler registrerade:      {5}`r`nFiler klara:             {6}`r`nFel i sessionen:         {7}`r`n`r`nKopierat från UNC:       {8}`r`nKopierat tillbaka:       {9}`r`n`r`nOriginalstorlek räknad:  {10}`r`nSlutstorlek räknad:      {11}`r`nSparat utrymme:           {12} ({13:N1} %)`r`nFiler i beräkningen:      {14}`r`n`r`nTid kopiering in:         {15}`r`nSnitt in:                 {16:N1} MB/s`r`nTid kopiering tillbaka:  {17}`r`nSnitt tillbaka:           {18:N1} MB/s" -f $sessionStatus,$started,$ended,$elapsed,$sessionQueueCount,$sessionFiles.Count,$sessionCompleted,$sessionErrors,(SizeText $inBytes),(SizeText $outBytes),(SizeText $sourceCompleted),(SizeText $finalCompleted),(SizeText $saved),$savedPct,$savingsFiles,([TimeSpan]::FromSeconds($inSec).ToString('hh\:mm\:ss')),$avgIn,([TimeSpan]::FromSeconds($outSec).ToString('hh\:mm\:ss')),$avgOut)
+    $sessionStatusDisplay = switch ($sessionStatus) {
+        'Running'   { T 'DashboardSessionRunning' 'Running' }
+        'Completed' { T 'DashboardSessionCompleted' 'Completed' }
+        'Stopped'   { T 'DashboardSessionStopped' 'Stopped' }
+        'Error'     { T 'DashboardSessionError' 'Error' }
+        default     { T 'DashboardNotStarted' 'Not started' }
+    }
+    $runSummaryFallback="SESSION`r`nStatus:                  {0}`r`nStarted:                 {1}`r`nEnded:                   {2}`r`nRuntime:                 {3}`r`nQueues registered:       {4}`r`nFiles registered:        {5}`r`nFiles completed:         {6}`r`nSession errors:          {7}`r`n`r`nCopied from UNC:         {8}`r`nCopied back:             {9}`r`n`r`nOriginal size counted:   {10}`r`nFinal size counted:      {11}`r`nSpace saved:             {12} ({13:N1} %)`r`nFiles in calculation:    {14}`r`n`r`nCopy-in time:            {15}`r`nAverage in:              {16:N1} MB/s`r`nCopy-back time:          {17}`r`nAverage back:            {18:N1} MB/s"
+    $runBox.Text=(T 'DashboardSessionSummary' $runSummaryFallback @($sessionStatusDisplay,$started,$ended,$elapsed,$sessionQueueCount,$sessionFiles.Count,$sessionCompleted,$sessionErrors,(SizeText $inBytes),(SizeText $outBytes),(SizeText $sourceCompleted),(SizeText $finalCompleted),(SizeText $saved),$savedPct,$savingsFiles,([TimeSpan]::FromSeconds($inSec).ToString('hh\:mm\:ss')),$avgIn,([TimeSpan]::FromSeconds($outSec).ToString('hh\:mm\:ss')),$avgOut))
 
     $allRates=@($allRates.ToArray())
     [double]$avg=0
@@ -629,15 +732,15 @@ $runBox.Text=("SESSION`r`nStatus:                  {0}`r`nStartad:              
             [void]$sgrid.Rows.Add([IO.Path]::GetFileName([string](Get-ObjectProperty $c 'File' '')),[string](Get-ObjectProperty $c 'Direction' ''),(SizeText([double](Get-ObjectProperty $c 'Bytes' 0))),('{0:N1}'-f$rate),([TimeSpan]::FromSeconds([double](Get-ObjectProperty $c 'Seconds' 0)).ToString('hh\:mm\:ss')),[string](Get-ObjectProperty $c 'StartedLocal' ''))
         }
     }
-    $status.Text=('Senast uppdaterad: {0:HH:mm:ss} | {1} | Inventering v{2}: {3} poster | Felkö: {4}'-f(Get-Date),$(if($script:ArchiveView){'ARKIV: '+[IO.Path]::GetFileName($script:StatisticsViewPath)}else{'AKTUELL SESSION'}),$(if($inventoryDoc){$inventoryDoc.version}else{'-'}),$total,$errorCount)
+    $viewName=if($script:ArchiveView){T 'DashboardArchive' 'ARCHIVE: {0}' @([IO.Path]::GetFileName($script:StatisticsViewPath))}else{T 'DashboardCurrentSession' 'CURRENT SESSION'};$status.Text=(T 'DashboardLastUpdated' 'Last updated: {0:HH:mm:ss} | {1} | Inventory v{2}: {3} items | Error queue: {4}' @((Get-Date),$viewName,$(if($inventoryDoc){$inventoryDoc.version}else{'-'}),$total,$errorCount))
     Write-DashboardLog 'VERBOSE' ("Refresh: total={0}; remaining={1}; processed={2}; readyReturn={3}; completed={4}; errors={5}; bytesRemaining={6}" -f $total,$remaining,$processed,$readyReturn,$completed,$errorCount,[int64]$bytes)
     }catch{
         Write-DashboardLog 'ERROR' ('Refresh-Dashboard: '+$_.Exception.Message)
-        $status.Text='Fel vid uppdatering av köstatistik. Se dashboard-loggen.'
+        $status.Text=(T 'DashboardRefreshError' 'Error refreshing queue statistics. See dashboard log.')
     }
 }
 $form.Add_Shown({
-    Write-DashboardLog 'INFO' 'Dashboard-fönstret visas.'
+    Write-DashboardLog 'INFO' 'Dashboard window shown.'
     Set-GridLayout
 })
 $form.Add_Resize({Set-GridLayout})
@@ -646,17 +749,27 @@ $bContinue.Add_Click({Continue-SelectedError})
 $bRemoveError.Add_Click({Remove-SelectedError})
 $bDetails.Add_Click({Toggle-QueueConsole})
 $bLoadStats.Add_Click({
-    $dlg=New-Object Windows.Forms.OpenFileDialog;$dlg.Title='Öppna sparad MediaPrep-statistik';$dlg.Filter='MediaPrep statistik (*.json)|*.json';if(Test-Path -LiteralPath $statisticsArchiveFolder -PathType Container){$dlg.InitialDirectory=$statisticsArchiveFolder};$dlg.Multiselect=$false
-    if($dlg.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK){$script:StatisticsViewPath=$dlg.FileName;$script:ArchiveView=$true;Write-DashboardLog 'INFO' ('Arkivstatistik öppnad: '+$dlg.FileName);Refresh-Dashboard};$dlg.Dispose()
+    $dlg=New-Object Windows.Forms.OpenFileDialog;$dlg.Title=(T 'DashboardOpenStatistics' 'Open saved MediaPrep statistics');$dlg.Filter=(T 'DashboardStatisticsFilter' 'MediaPrep statistics (*.json)|*.json');if(Test-Path -LiteralPath $statisticsArchiveFolder -PathType Container){$dlg.InitialDirectory=$statisticsArchiveFolder};$dlg.Multiselect=$false
+    if($dlg.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK){$script:StatisticsViewPath=$dlg.FileName;$script:ArchiveView=$true;Write-DashboardLog 'INFO' ('Archived statistics opened: '+$dlg.FileName);Refresh-Dashboard};$dlg.Dispose()
 })
-$bCurrentStats.Add_Click({$script:StatisticsViewPath=$statisticsSessionPath;$script:ArchiveView=$false;Write-DashboardLog 'INFO' 'Visar aktuell session.';Refresh-Dashboard})
+$bCurrentStats.Add_Click({$script:StatisticsViewPath=$statisticsSessionPath;$script:ArchiveView=$false;Write-DashboardLog 'INFO' 'Showing current session.';Refresh-Dashboard})
 $bClose.Add_Click({$form.Close()})
 $bProcess.Add_Click({
-    if([Windows.Forms.MessageBox]::Show('Bearbeta hela felkön med "Ignorera avkodningsfel"?','MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Question) -eq [Windows.Forms.DialogResult]::Yes){
+    if([Windows.Forms.MessageBox]::Show((T 'DashboardConfirmProcessErrorQueue' 'Process the entire error queue with "Ignore decode errors"?'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Question) -eq [Windows.Forms.DialogResult]::Yes){
         Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path (Join-Path $Root 'App') 'MediaPrep.ps1')+'"'),'-EncodeOnly','-ProcessErrorQueue','-IgnoreDecodeErrors','-NoConfirm','-NoPause')
     }
 })
 $timer=New-Object Windows.Forms.Timer;$timer.Interval=1000;$timer.Add_Tick({Refresh-Dashboard});$timer.Start()
-$form.Add_FormClosed({Write-DashboardLog 'INFO' 'Dashboard-fönstret stängs.';$timer.Stop();$timer.Dispose()})
+$form.Add_FormClosed({
+    # Closing the dashboard must never terminate the queue host. If the detailed
+    # queue console is currently visible, hide that window as part of UI cleanup.
+    try{
+        $hWnd=Get-QueueConsoleHandle
+        if($hWnd -ne [IntPtr]::Zero){[void][MediaPrep.DashboardNative]::ShowWindow($hWnd,0)}
+        $script:QueueConsoleVisible=$false
+    }catch{}
+    Write-DashboardLog 'INFO' 'Dashboard window closing.'
+    $timer.Stop();$timer.Dispose()
+})
 Refresh-Dashboard
 [void]$form.ShowDialog()

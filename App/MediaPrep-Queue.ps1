@@ -55,8 +55,8 @@ function Restart-ElevatedIfRequired {
         return $false
     }
 
-    Write-Host '[INFO ] Valda inställningar kräver administratörsrättigheter.' -ForegroundColor Cyan
-    Write-Host '[INFO ] Windows visar nu en UAC-fråga. Godkänn den för att starta nattkön.' -ForegroundColor Cyan
+    Write-Host '[INFO ] The selected settings require administrator privileges.' -ForegroundColor Cyan
+    Write-Host '[INFO ] Windows is now showing a UAC prompt. Approve it to start the queue.' -ForegroundColor Cyan
 
     $quotedScript = '"' + $script:QueueScriptPath.Replace('"','\"') + '"'
     $quotedJob = '"' + $JobFile.Replace('"','\"') + '"'
@@ -75,7 +75,7 @@ function Restart-ElevatedIfRequired {
     }
     catch [System.ComponentModel.Win32Exception] {
         if ($_.Exception.NativeErrorCode -eq 1223) {
-            throw 'UAC-frågan avbröts. Kön startades inte eftersom administratörsskyddet inte kunde aktiveras.'
+            throw 'The UAC prompt was cancelled. The queue was not started because administrator protection could not be enabled.'
         }
         throw
     }
@@ -94,9 +94,9 @@ public static class MediaPrepPower {
     $ES_SYSTEM_REQUIRED = [uint32]1
     $flags = [uint32]($ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED)
     $result = [MediaPrepPower]::SetThreadExecutionState($flags)
-    if($result -eq 0){throw 'Windows kunde inte aktivera skyddet mot strömsparläge.'}
+    if($result -eq 0){throw 'Windows could not enable sleep prevention.'}
     $script:SleepProtectionActive=$true
-    Write-Host '[OK   ] Strömsparläge förhindras så länge MediaPrep-kön körs.' -ForegroundColor Green
+    Write-Host '[OK   ] Sleep is prevented while the MediaPrep queue is running.' -ForegroundColor Green
 }
 
 function Disable-SleepProtection {
@@ -104,7 +104,7 @@ function Disable-SleepProtection {
     try{
         $ES_CONTINUOUS = [Convert]::ToUInt32('80000000', 16)
         [void][MediaPrepPower]::SetThreadExecutionState([uint32]$ES_CONTINUOUS)
-        Write-Host '[INFO ] Normala strömsparinställningar är återaktiverade.' -ForegroundColor Cyan
+        Write-Host '[INFO ] Normal power-saving settings have been restored.' -ForegroundColor Cyan
     }finally{$script:SleepProtectionActive=$false}
 }
 
@@ -120,7 +120,7 @@ function Get-RegistryValueState([string]$Path,[string]$Name){
 }
 
 function Enable-UpdateRestartProtection {
-    if(-not(Test-IsAdministrator)){throw 'Windows Update-skyddet kräver att nattkön startas som administratör.'}
+    if(-not(Test-IsAdministrator)){throw 'Windows Update restart protection requires the queue to run as administrator.'}
     $path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
     $script:UpdateProtectionBackup=[pscustomobject]@{
         Path=$path
@@ -130,8 +130,8 @@ function Enable-UpdateRestartProtection {
     if(-not(Test-Path -LiteralPath $path)){New-Item -Path $path -Force|Out-Null}
     New-ItemProperty -Path $path -Name 'NoAutoRebootWithLoggedOnUsers' -PropertyType DWord -Value 1 -Force|Out-Null
     New-ItemProperty -Path $path -Name 'AUOptions' -PropertyType DWord -Value 4 -Force|Out-Null
-    Write-Host '[OK   ] Tillfälligt skydd mot automatisk Windows Update-omstart är aktiverat.' -ForegroundColor Green
-    Write-Host '[INFO ] Inga Windows Update-tjänster har stoppats eller pausats.' -ForegroundColor Cyan
+    Write-Host '[OK   ] Temporary protection against automatic Windows Update restart is enabled.' -ForegroundColor Green
+    Write-Host '[INFO ] No Windows Update services were stopped or paused.' -ForegroundColor Cyan
 }
 
 function Restore-RegistryValueState([string]$Path,[string]$Name,[object]$State){
@@ -153,7 +153,7 @@ function Disable-UpdateRestartProtection {
         if(-not$b.NoAutoReboot.PathExists -and -not$b.AUOptions.PathExists){
             try{if((Get-ChildItem -LiteralPath $b.Path -ErrorAction SilentlyContinue).Count-eq0 -and (Get-Item -LiteralPath $b.Path).Property.Count-eq0){Remove-Item -LiteralPath $b.Path -Force}}catch{}
         }
-        Write-Host '[INFO ] Tidigare Windows Update-inställningar har återställts.' -ForegroundColor Cyan
+        Write-Host '[INFO ] Previous Windows Update settings have been restored.' -ForegroundColor Cyan
     }
     finally {
         $script:UpdateProtectionBackup = $null
@@ -228,13 +228,13 @@ function Invoke-MediaPrepChildProcess {
     $startInfo.CreateNoWindow = $false
 
     if ($script:VerboseLogging) {
-        Write-Host ('[VERBOSE] Barnprocess: {0} {1}' -f $startInfo.FileName,$startInfo.Arguments) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Child process: {0} {1}' -f $startInfo.FileName,$startInfo.Arguments) -ForegroundColor DarkGray
     }
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) {
-        throw 'MediaPrep-processen kunde inte startas.'
+        throw 'The MediaPrep process could not be started.'
     }
 
     $process.WaitForExit()
@@ -269,13 +269,13 @@ function Save-RemainingQueue {
     Save-JsonUtf8Bom -Path $JobFile -Value $Job
     Save-JsonUtf8Bom -Path $script:SettingsFile -Value $Job
 
-    Write-Host ("[INFO ] Kölistan uppdaterad. Återstår: {0} mappar." -f @($RemainingQueue).Count) -ForegroundColor Cyan
+    Write-Host ("[INFO ] Queue list updated. Remaining: {0} folders." -f @($RemainingQueue).Count) -ForegroundColor Cyan
     if (@($RemainingQueue).Count -eq 0) {
-        Write-Host '[OK   ] Kölistan är nu tom.' -ForegroundColor Green
+        Write-Host '[OK   ] The queue list is now empty.' -ForegroundColor Green
     }
     if ($script:VerboseLogging) {
         foreach ($remaining in $RemainingQueue) {
-            Write-Host ("[VERBOSE] Kvar i kön: {0}" -f $remaining) -ForegroundColor DarkGray
+            Write-Host ("[VERBOSE] Remaining in queue: {0}" -f $remaining) -ForegroundColor DarkGray
         }
     }
 }
@@ -343,12 +343,12 @@ function Remove-EmptySubdirectories {
             if (-not $hasContent) {
                 Remove-Item -LiteralPath $directory.FullName -Force -ErrorAction Stop
                 $removed++
-                Write-Host ("[INFO ] Tog bort tom lokal mapp: {0}" -f $directory.FullName) -ForegroundColor DarkCyan
+                Write-Host ("[INFO ] Removed empty local folder: {0}" -f $directory.FullName) -ForegroundColor DarkCyan
             }
         }
         catch {
             if ($script:VerboseLogging) {
-                Write-Host ("[VERBOSE] Kunde inte kontrollera/radera mappen {0}: {1}" -f $directory.FullName,$_.Exception.Message) -ForegroundColor DarkGray
+                Write-Host ("[VERBOSE] Could not inspect/remove folder {0}: {1}" -f $directory.FullName,$_.Exception.Message) -ForegroundColor DarkGray
             }
         }
     }
@@ -364,16 +364,16 @@ function Invoke-LocalEmptyFolderCleanup {
     $total += Remove-EmptySubdirectories -RootPath (Join-Path $root 'MKV')
 
     if ($total -gt 0) {
-        Write-Host ("[OK   ] Tomma lokala undermappar borttagna: {0}" -f $total) -ForegroundColor Green
+        Write-Host ("[OK   ] Empty local subfolders removed: {0}" -f $total) -ForegroundColor Green
     }
     elseif ($script:VerboseLogging) {
-        Write-Host '[VERBOSE] Inga tomma lokala undermappar behövde tas bort.' -ForegroundColor DarkGray
+        Write-Host '[VERBOSE] No empty local subfolders needed to be removed.' -ForegroundColor DarkGray
     }
 }
 
 try{
-    if(-not(Test-Path -LiteralPath $mediaPrep -PathType Leaf)){throw "MediaPrep.ps1 hittades inte: $mediaPrep"}
-    if(-not(Test-Path -LiteralPath $JobFile -PathType Leaf)){throw "Köfilen hittades inte: $JobFile"}
+    if(-not(Test-Path -LiteralPath $mediaPrep -PathType Leaf)){throw "MediaPrep.ps1 was not found: $mediaPrep"}
+    if(-not(Test-Path -LiteralPath $JobFile -PathType Leaf)){throw "Queue job file was not found: $JobFile"}
     $job=Get-Content -LiteralPath $JobFile -Raw -Encoding UTF8|ConvertFrom-Json
     $configuredSettingsFile=[string](Get-P $job 'SettingsFile' '')
     if (-not [string]::IsNullOrWhiteSpace($configuredSettingsFile)) { $script:SettingsFile=$configuredSettingsFile }
@@ -383,11 +383,11 @@ try{
     $script:StopRequestFile=[string](Get-P $job 'StopRequestFile' '')
     if(-not [string]::IsNullOrWhiteSpace($script:StopRequestFile)){Remove-Item -LiteralPath $script:StopRequestFile -Force -ErrorAction SilentlyContinue}
     if($script:VerboseLogging){
-        Write-Host ('[VERBOSE] Köskript: {0}' -f $script:QueueScriptPath) -ForegroundColor DarkGray
-        Write-Host ('[VERBOSE] Jobbfil: {0}' -f $JobFile) -ForegroundColor DarkGray
-        Write-Host ('[VERBOSE] Administratör: {0}' -f (Test-IsAdministrator)) -ForegroundColor DarkGray
-        Write-Host ('[VERBOSE] UNC-kö aktiverad: {0}' -f [bool](Get-P $job 'UncEnabled' $false)) -ForegroundColor DarkGray
-        Write-Host ('[VERBOSE] Antal köposter: {0}' -f @((Get-P $job 'UncQueue' @())).Count) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Queue script: {0}' -f $script:QueueScriptPath) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Job file: {0}' -f $JobFile) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Administrator: {0}' -f (Test-IsAdministrator)) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] UNC queue enabled: {0}' -f [bool](Get-P $job 'UncEnabled' $false)) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Queue items: {0}' -f @((Get-P $job 'UncQueue' @())).Count) -ForegroundColor DarkGray
     }
     if (Restart-ElevatedIfRequired -Job $job) {
         return [int]0
@@ -399,11 +399,11 @@ try{
     $useQueue = ([bool](Get-P $job 'UncEnabled' $false) -and $workMode -ne 'AllInOne')
 
     if ($useQueue -and $queue.Count -eq 0) {
-        throw 'UNC-kön är aktiverad men innehåller inga mappar.'
+        throw 'The UNC queue is enabled but contains no folders.'
     }
 
     if ($workMode -eq 'AllInOne' -and $localFileQueue.Count -eq 0) {
-        throw 'All in one är valt men fillistan är tom.'
+        throw 'All in one is selected but the file list is empty.'
     }
 
     if ($useQueue) {
@@ -426,37 +426,37 @@ try{
         Status='Running'
     })
     Write-Host '================================================================' -ForegroundColor Cyan
-    Write-Host ' MediaPrep MKV Toolkit nattkö' -ForegroundColor Cyan
-    Write-Host (" Köposter: {0}" -f @($items).Count) -ForegroundColor Cyan
+    Write-Host ' MediaPrep MKV Toolkit queue' -ForegroundColor Cyan
+    Write-Host (" Queue items: {0}" -f @($items).Count) -ForegroundColor Cyan
     Write-Host '================================================================' -ForegroundColor Cyan
     if($script:VerboseLogging){
-        Write-Host ('[VERBOSE] Köstart UTC: {0}' -f (Get-Date).ToUniversalTime().ToString('o')) -ForegroundColor DarkGray
-        Write-Host ('[VERBOSE] Arbetsläge: {0}; använd UNC-kö: {1}; poster: {2}' -f $workMode,$useQueue,@($items).Count) -ForegroundColor DarkGray
-        for($vi=0;$vi -lt @($items).Count;$vi++){Write-Host ('[VERBOSE] Köpost {0}/{1}: {2}' -f ($vi+1),@($items).Count,[string]$items[$vi]) -ForegroundColor DarkGray}
+        Write-Host ('[VERBOSE] Queue start UTC: {0}' -f (Get-Date).ToUniversalTime().ToString('o')) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Work mode: {0}; use UNC queue: {1}; items: {2}' -f $workMode,$useQueue,@($items).Count) -ForegroundColor DarkGray
+        for($vi=0;$vi -lt @($items).Count;$vi++){Write-Host ('[VERBOSE] Queue item {0}/{1}: {2}' -f ($vi+1),@($items).Count,[string]$items[$vi]) -ForegroundColor DarkGray}
     }
     for($i=0;$i-lt@($items).Count;$i++){
         $unc=[string]$items[$i]
         Write-Host ''
         Write-Host ('='*64) -ForegroundColor DarkCyan
-        if($useQueue){Write-Host (" Kö {0}/{1}: {2}" -f ($i+1),@($items).Count,$unc) -ForegroundColor Yellow}
-        else{Write-Host ' Lokal körning utan UNC-kö' -ForegroundColor Yellow}
+        if($useQueue){Write-Host (" Queue {0}/{1}: {2}" -f ($i+1),@($items).Count,$unc) -ForegroundColor Yellow}
+        else{Write-Host ' Local run without UNC queue' -ForegroundColor Yellow}
         Write-Host ('='*64) -ForegroundColor DarkCyan
         if($useQueue -and (-not(Test-Path -LiteralPath $unc -PathType Container))){
-            Write-Host ("[ERROR] UNC-mappen kan inte nås: {0}" -f $unc) -ForegroundColor Red
+            Write-Host ("[ERROR] UNC folder cannot be reached: {0}" -f $unc) -ForegroundColor Red
             $allOk=$false;$failed.Add($unc);continue
         }
         $args=Build-Args $job $unc
-        if($script:VerboseLogging){Write-Host ('[VERBOSE] MediaPrep-argument: {0}' -f ($args -join ' | ')) -ForegroundColor DarkGray}
+        if($script:VerboseLogging){Write-Host ('[VERBOSE] MediaPrep arguments: {0}' -f ($args -join ' | ')) -ForegroundColor DarkGray}
         $code = Invoke-MediaPrepChildProcess -Arguments $args
-        Write-Host ("[INFO ] MediaPrep-processen avslutades med exitkod {0}." -f $code) -ForegroundColor Cyan
+        Write-Host ("[INFO ] MediaPrep process exited with code {0}." -f $code) -ForegroundColor Cyan
         if($code-ne 0){
             $allOk=$false
-            $failedName = if ([string]::IsNullOrWhiteSpace($unc)) { 'Lokal körning' } else { $unc }
+            $failedName = if ([string]::IsNullOrWhiteSpace($unc)) { 'Local run' } else { $unc }
             $failed.Add($failedName)
-            Write-Host ("[ERROR] Köposten slutade med exitkod {0}. Nästa post fortsätter." -f $code) -ForegroundColor Red
+            Write-Host ("[ERROR] Queue item ended with exit code {0}. The next item will continue." -f $code) -ForegroundColor Red
         }
         else {
-            Write-Host '[OK   ] Köposten är klar.' -ForegroundColor Green
+            Write-Host '[OK   ] Queue item completed.' -ForegroundColor Green
 
             if ($useQueue) {
                 $removeIndex = -1
@@ -471,7 +471,7 @@ try{
                     $remainingQueue.RemoveAt($removeIndex)
                 }
                 else {
-                    Write-Host ("[WARN ] Den färdiga köposten hittades inte i återstående kö: {0}" -f $unc) -ForegroundColor Yellow
+                    Write-Host ("[WARN ] The completed queue item was not found in the remaining queue: {0}" -f $unc) -ForegroundColor Yellow
                 }
 
                 Save-RemainingQueue -Job $job -RemainingQueue @($remainingQueue.ToArray())
@@ -481,7 +481,7 @@ try{
         }
     }
 
-    # En sista kontroll tar bort mappar som blev tomma under den sista återföringen.
+    # A final check removes folders that became empty during the final return copy.
     Invoke-LocalEmptyFolderCleanup
 
     if ($useQueue) {
@@ -505,20 +505,20 @@ try{
     })
     Write-Host ''
     Write-Host '================================================================' -ForegroundColor Cyan
-    Write-Host (" Kön är klar. Tid: {0}" -f $elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Cyan
-    if($allOk){Write-Host '[OK   ] Alla köposter slutfördes utan fel.' -ForegroundColor Green}
-    else{Write-Host ("[ERROR] Misslyckade köposter: {0}" -f $failed.Count) -ForegroundColor Red;foreach($f in $failed){Write-Host ("  - {0}" -f $f) -ForegroundColor Red}}
+    Write-Host (" Queue completed. Time: {0}" -f $elapsed.ToString('hh\:mm\:ss')) -ForegroundColor Cyan
+    if($allOk){Write-Host '[OK   ] All queue items completed without errors.' -ForegroundColor Green}
+    else{Write-Host ("[ERROR] Failed queue items: {0}" -f $failed.Count) -ForegroundColor Red;foreach($f in $failed){Write-Host ("  - {0}" -f $f) -ForegroundColor Red}}
     Write-Host '================================================================' -ForegroundColor Cyan
 
     $shutdown=[bool](Get-P $job 'ShutdownAfterSuccess' $false)
     if($shutdown -and $allOk){
         $script:ShutdownRequested=$true
-        Write-Host '[INFO ] Automatisk avstängning kommer att planeras efter att skyddsinställningarna har återställts.' -ForegroundColor Cyan
+        Write-Host '[INFO ] Automatic shutdown will be scheduled after protection settings have been restored.' -ForegroundColor Cyan
     }elseif($shutdown -and -not$allOk){
-        Write-Host '[WARN ] Datorn stängs inte av eftersom minst en köpost misslyckades.' -ForegroundColor Yellow
+        Write-Host '[WARN ] The computer will not shut down because at least one queue item failed.' -ForegroundColor Yellow
     }
     if(-not[bool](Get-P $job 'NoPause' $false)){
-        Write-Host '';[void](Read-Host 'Tryck Enter för att avsluta')
+        Write-Host '';[void](Read-Host 'Press Enter to exit')
     }
     if ($allOk) {
         $script:FinalExitCode = 0
@@ -529,46 +529,46 @@ try{
 }catch{
     Write-Host ("[ERROR] {0}" -f $_.Exception.Message) -ForegroundColor Red
     if($script:VerboseLogging){
-        Write-Host ('[VERBOSE] Feltyp: {0}' -f $_.Exception.GetType().FullName) -ForegroundColor DarkRed
-        Write-Host ('[VERBOSE] Kategori: {0}' -f $_.CategoryInfo) -ForegroundColor DarkRed
+        Write-Host ('[VERBOSE] Error type: {0}' -f $_.Exception.GetType().FullName) -ForegroundColor DarkRed
+        Write-Host ('[VERBOSE] Category: {0}' -f $_.CategoryInfo) -ForegroundColor DarkRed
         Write-Host ('[VERBOSE] FullyQualifiedErrorId: {0}' -f $_.FullyQualifiedErrorId) -ForegroundColor DarkRed
         if($_.InvocationInfo){Write-Host ('[VERBOSE] Position: {0}' -f $_.InvocationInfo.PositionMessage) -ForegroundColor DarkRed}
         if($_.ScriptStackTrace){Write-Host ('[VERBOSE] Stack: {0}' -f $_.ScriptStackTrace) -ForegroundColor DarkRed}
     }
     $script:FinalExitCode = 1
-    if(-not(Test-Path variable:job) -or -not[bool](Get-P $job 'NoPause' $false)){[void](Read-Host 'Tryck Enter för att avsluta')}
+    if(-not(Test-Path variable:job) -or -not[bool](Get-P $job 'NoPause' $false)){[void](Read-Host 'Press Enter to exit')}
 }
 finally {
     if ($script:VerboseLogging) {
-        Write-Host ('[VERBOSE] Före återställning: FinalExitCode={0}, ShutdownRequested={1}' -f $script:FinalExitCode,$script:ShutdownRequested) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] Before restore: FinalExitCode={0}, ShutdownRequested={1}' -f $script:FinalExitCode,$script:ShutdownRequested) -ForegroundColor DarkGray
     }
     Restore-AllInOneConfiguration
     Disable-UpdateRestartProtection
     Disable-SleepProtection
     if ($script:VerboseLogging) {
-        Write-Host ('[VERBOSE] Efter återställning: FinalExitCode={0}, ShutdownRequested={1}' -f $script:FinalExitCode,$script:ShutdownRequested) -ForegroundColor DarkGray
+        Write-Host ('[VERBOSE] After restore: FinalExitCode={0}, ShutdownRequested={1}' -f $script:FinalExitCode,$script:ShutdownRequested) -ForegroundColor DarkGray
     }
 }
 
 if ($script:VerboseLogging) {
     Write-Host ''
-    Write-Host '================ VERBOSE FELSÖKNINGSPAUS ================' -ForegroundColor Yellow
-    Write-Host (' Slutlig exitkod........: {0}' -f $script:FinalExitCode) -ForegroundColor Yellow
-    Write-Host (' Avstängning väntar.....: {0}' -f $script:ShutdownRequested) -ForegroundColor Yellow
-    Write-Host ' Läs igenom eventuell röd text ovan innan du fortsätter.' -ForegroundColor Yellow
+    Write-Host '================ VERBOSE TROUBLESHOOTING PAUSE ================' -ForegroundColor Yellow
+    Write-Host (' Final exit code........: {0}' -f $script:FinalExitCode) -ForegroundColor Yellow
+    Write-Host (' Shutdown pending......: {0}' -f $script:ShutdownRequested) -ForegroundColor Yellow
+    Write-Host ' Review any red text above before continuing.' -ForegroundColor Yellow
     Write-Host '==========================================================' -ForegroundColor Yellow
-    [void](Read-Host 'Tryck Enter för att avsluta felsökningsläget')
+    [void](Read-Host 'Press Enter to exit troubleshooting mode')
 }
 
 if ($script:ShutdownRequested -and $script:FinalExitCode -eq 0) {
-    Write-Host '[WARN ] Datorn stängs av om 60 sekunder. Kör shutdown /a i ett annat fönster för att avbryta.' -ForegroundColor Yellow
-    & shutdown.exe /s /t 60 /c "MediaPrep MKV Toolkit-kön är färdig och alla köposter lyckades."
+    Write-Host '[WARN ] The computer will shut down in 60 seconds. Run shutdown /a in another window to cancel.' -ForegroundColor Yellow
+    & shutdown.exe /s /t 60 /c "The MediaPrep MKV Toolkit queue is complete and all queue items succeeded."
     $shutdownExitCode = $LASTEXITCODE
     if ($shutdownExitCode -eq 0) {
-        Write-Host '[OK   ] Windows har accepterat avstängningsbegäran.' -ForegroundColor Green
+        Write-Host '[OK   ] Windows accepted the shutdown request.' -ForegroundColor Green
     }
     else {
-        Write-Host ("[ERROR] Windows avvisade avstängningsbegäran. Exitkod: {0}" -f $shutdownExitCode) -ForegroundColor Red
+        Write-Host ("[ERROR] Windows rejected the shutdown request. Exit code: {0}" -f $shutdownExitCode) -ForegroundColor Red
         $script:FinalExitCode = 1
     }
 }

@@ -23,9 +23,41 @@ function Write-UpdateLog([string]$Level,[string]$Message){
 }
 function Read-Json([string]$Path){if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $null};return(Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json)}
 function Write-Json([string]$Path,[object]$Value){$Value|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $Path -Encoding UTF8}
-function P([object]$Object,[string]$Name,$Default=$null){if($null-eq$Object){return$Default};$p=$Object.PSObject.Properties[$Name];if($null-eq$p){return$Default};return$p.Value}
+function P([object]$Object,[string]$Name,$Default=$null){
+    if($null -eq $Object){return $Default}
+    $p=$Object.PSObject.Properties[$Name]
+    if($null -eq $p){return $Default}
+    return $p.Value
+}
+function Test-MediaPrepWorkerActive {
+    # Defense in depth: activation must never replace App/Tools-facing program files
+    # while a MediaPrep queue, engine, or media tool belonging to this root is alive.
+    try{
+        $rootText=[string]$Root
+        $all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 3 -ErrorAction Stop | Select-Object ProcessId,Name,ExecutablePath,CommandLine)
+        foreach($proc in $all){
+            if([int]$proc.ProcessId -eq [int]$PID){continue}
+            $name=[string]$proc.Name
+            $cmd=[string]$proc.CommandLine
+            $exe=[string]$proc.ExecutablePath
+            $belongs=($cmd.IndexOf($rootText,[StringComparison]::OrdinalIgnoreCase)-ge0 -or $exe.IndexOf($rootText,[StringComparison]::OrdinalIgnoreCase)-ge0)
+            if(-not$belongs){continue}
+            if($name -match '^(powershell|pwsh)\.exe$' -and $cmd -match 'MediaPrep-(Queue-Host|Queue)\.ps1|[\\/]MediaPrep\.ps1'){return $true}
+            if($name -match '^(ffmpeg|ffprobe|mkvmerge)\.exe$'){return $true}
+        }
+        return $false
+    }catch{
+        # If process inspection is unavailable, use the queue run marker conservatively.
+        try{
+            $run=Read-Json (Join-Path $dataFolder 'queue-run-current.json')
+            if($null-ne$run -and [string](P $run 'Status' '') -eq 'Running'){return $true}
+        }catch{}
+        return $false
+    }
+}
+
 function Copy-ProgramPayload([string]$Source,[string]$Destination,[switch]$ClearProgramDirectories){
-    foreach($dirName in @('App','Languages','Installer')){
+    foreach($dirName in @('App','Languages','Installer','Assets')){
         $src=Join-Path $Source $dirName
         if(-not(Test-Path -LiteralPath $src -PathType Container)){continue}
         $dst=Join-Path $Destination $dirName
@@ -43,6 +75,18 @@ function Copy-ProgramPayload([string]$Source,[string]$Destination,[switch]$Clear
         if(-not(Test-Path -LiteralPath $errorDestination -PathType Container)){New-Item -ItemType Directory -Path $errorDestination -Force|Out-Null}
         Copy-Item -LiteralPath $errorHelper -Destination (Join-Path $errorDestination 'Bearbeta felko.cmd') -Force
     }
+}
+function Unblock-ProgramPayload([string]$Destination){
+    try{
+        foreach($dirName in @('App','Languages','Installer','Assets','Error')){
+            $dir=Join-Path $Destination $dirName
+            if(Test-Path -LiteralPath $dir -PathType Container){Get-ChildItem -LiteralPath $dir -File -Recurse -ErrorAction SilentlyContinue|Unblock-File -ErrorAction SilentlyContinue}
+        }
+        foreach($fileName in @('Start MediaPrep.cmd','README.md','CHANGELOG.md','LICENSE.md','THIRD-PARTY-NOTICES.md')){
+            $file=Join-Path $Destination $fileName
+            if(Test-Path -LiteralPath $file -PathType Leaf){Unblock-File -LiteralPath $file -ErrorAction SilentlyContinue}
+        }
+    }catch{Write-UpdateLog WARN ('Could not remove Internet-zone markers from program files: '+$_.Exception.Message)}
 }
 function Normalize-CmdFile([string]$Path){
     if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return}
@@ -87,6 +131,11 @@ try{
         if($null-ne(Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)){throw 'Start Center did not close within 60 seconds.'}
     }
 
+    if(Test-MediaPrepWorkerActive){
+        throw 'MediaPrep update was cancelled because a queue or media worker is still running.'
+    }
+    Write-UpdateLog INFO 'Queue/media worker safety check passed.'
+
     # Always protect the currently running program version before any activation,
     # including a manual rollback. This gives failed update/restore operations a
     # safe recovery source.
@@ -100,6 +149,7 @@ try{
 
     Write-UpdateLog INFO ("Activating MediaPrep {0} from {1}" -f $targetVersion,$stageRoot)
     Copy-ProgramPayload -Source $stageRoot -Destination $Root -ClearProgramDirectories
+    Unblock-ProgramPayload -Destination $Root
     Normalize-CmdFile -Path (Join-Path $Root 'Start MediaPrep.cmd')
     Normalize-CmdFile -Path (Join-Path $Root 'Error\Bearbeta felko.cmd')
     if(-not(Test-Path -LiteralPath (Join-Path $Root 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw 'Activation verification failed: MediaPrep-Start.ps1 is missing.'}

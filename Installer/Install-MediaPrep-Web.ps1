@@ -116,6 +116,9 @@ try {
         Write-Host 'SHA-256: OK' -ForegroundColor Green
     }
 
+    # After integrity verification, remove the Internet-zone marker before extraction when possible.
+    try{Unblock-File -LiteralPath $zipPath -ErrorAction SilentlyContinue}catch{}
+
     Write-Step 'Extracting release package'
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
@@ -167,7 +170,7 @@ try {
     if($existingMediaPrep -and $Force){
         # Safe in-place program update: preserve Data, preferences, statistics,
         # downloaded tools, logs, queues and media working folders.
-        foreach($dirName in @('App','Languages','Installer')){
+        foreach($dirName in @('App','Languages','Installer','Assets')){
             $srcDir=Join-Path $packageRoot $dirName
             $dstDir=Join-Path $InstallPath $dirName
             if(Test-Path -LiteralPath $dstDir -PathType Container){Remove-Item -LiteralPath $dstDir -Recurse -Force}
@@ -205,6 +208,19 @@ try {
             Set-Content -LiteralPath $cmdPath -Value $cmdText -Encoding ASCII
         }
     }
+
+    # Best-effort removal of Internet-zone markers from program files only.
+    # Runtime/media folders are intentionally excluded.
+    try {
+        foreach($dirName in @('App','Languages','Installer','Assets','Error')) {
+            $dir=Join-Path $InstallPath $dirName
+            if(Test-Path -LiteralPath $dir -PathType Container){Get-ChildItem -LiteralPath $dir -File -Recurse -ErrorAction SilentlyContinue|Unblock-File -ErrorAction SilentlyContinue}
+        }
+        foreach($fileName in @('Start MediaPrep.cmd','README.md','CHANGELOG.md','LICENSE.md','THIRD-PARTY-NOTICES.md')) {
+            $file=Join-Path $InstallPath $fileName
+            if(Test-Path -LiteralPath $file -PathType Leaf){Unblock-File -LiteralPath $file -ErrorAction SilentlyContinue}
+        }
+    } catch {}
 
     $installedLauncher = Join-Path $InstallPath 'Start MediaPrep.cmd'
     $installedStartCenter = Join-Path $InstallPath 'App\MediaPrep-Start.ps1'

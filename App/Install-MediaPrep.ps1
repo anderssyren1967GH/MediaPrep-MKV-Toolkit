@@ -47,7 +47,7 @@ New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
 
 # Copy only application assets. Runtime media, logs, queues and statistics are never cloned
 # when the installer is launched from an already-used MediaPrep installation.
-foreach($name in @('App','Languages','Tools','Installer')){
+foreach($name in @('App','Languages','Tools','Installer','Assets')){
     $src=Join-Path $sourceRoot $name
     if(Test-Path -LiteralPath $src){Copy-Item -LiteralPath $src -Destination $InstallPath -Recurse -Force}
 }
@@ -66,6 +66,19 @@ foreach($name in @('config.json','mediaprep.preferences.json')){
     $dst=Join-Path $dataTarget $name
     if((Test-Path -LiteralPath $src -PathType Leaf) -and -not(Test-Path -LiteralPath $dst -PathType Leaf)){Copy-Item -LiteralPath $src -Destination $dst -Force}
 }
+
+# Remove Internet-zone markers from the copied MediaPrep program payload.
+# This is best-effort and never scans the user's media/runtime folders.
+try {
+    foreach($dirName in @('App','Languages','Tools','Installer','Assets','Error')) {
+        $dir=Join-Path $InstallPath $dirName
+        if(Test-Path -LiteralPath $dir -PathType Container){Get-ChildItem -LiteralPath $dir -File -Recurse -ErrorAction SilentlyContinue|Unblock-File -ErrorAction SilentlyContinue}
+    }
+    foreach($fileName in @('Start MediaPrep.cmd','README.md','CHANGELOG.md','LICENSE.md','THIRD-PARTY-NOTICES.md')) {
+        $file=Join-Path $InstallPath $fileName
+        if(Test-Path -LiteralPath $file -PathType Leaf){Unblock-File -LiteralPath $file -ErrorAction SilentlyContinue}
+    }
+} catch {}
 
 $requiredFolders = @(
     'UnProcessed','Processed','Data','Data\Temp','Data\Downloads','Loggar','Rapporter',

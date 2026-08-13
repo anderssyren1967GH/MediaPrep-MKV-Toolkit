@@ -1,45 +1,45 @@
 ﻿<#
 .SYNOPSIS
-    MediaPrep MKV Toolkit 0.11.52 - muxar, analyserar och omkodar till MKV och analyserar färdiga filer.
+    MediaPrep MKV Toolkit 0.11.53 - muxes, analyzes, encodes to MKV, and analyzes completed files.
 
 .DESCRIPTION
-    Kompatibel med Windows PowerShell 5.1.
-    Söker rekursivt efter TS, MP4 och AVI, hittar SRT eller VTT med samma filnamn,
-    konverterar VTT till en tillfällig SRT och muxar till MKV utan omkodning.
-    Oförändrade och redan aktuella MKV-filer hoppas över.
+    Compatible with Windows PowerShell 5.1.
+    Recursively searches for TS, MP4, AVI, MPG, MPEG, and MKV; finds matching SRT or VTT files,
+    converts VTT to a temporary SRT, and muxes to MKV without re-encoding.
+    Unchanged and already current MKV files are skipped.
 
 .PARAMETER RebuildIndex
-    Ignorerar tidigare index och bygger om det från början.
+    Ignores previous indexes and rebuilds them.
 
 .PARAMETER Force
-    Muxar om samtliga videofiler även om en aktuell MKV redan finns.
+    Remuxes all video files even if a current MKV already exists.
 
 .PARAMETER NoConfirm
-    Startar muxningen utan bekräftelsefråga.
+    Starts muxing without a confirmation prompt.
 
 .PARAMETER AnalyzeOnly
-    Hoppar över skanning och muxning och analyserar endast befintliga MKV-filer.
+    Skips scanning and muxing and analyzes only existing MKV files.
 
 .PARAMETER Reanalyze
-    Tvingar ny ffprobe-analys även om filen är oförändrad och finns i analyscachen.
+    Forces a new ffprobe analysis even when the file is unchanged and present in the analysis cache.
 
 .PARAMETER EncodeOnly
-    Hoppar över källskanning och muxning och arbetar direkt med MKV-mappen.
+    Skips source scanning and muxing and works directly with the MKV folder.
 
 .PARAMETER EncodeRecommended
-    Omkodar rekommenderade filer utan extra fråga.
+    Encodes recommended files without an additional prompt.
 
 .PARAMETER UncSourcePath
-    UNC-mapp som innehåller TS/MP4/AVI/MPG/MPEG och eventuella matchande SRT/VTT-filer.
+    UNC folder containing TS/MP4/AVI/MPG/MPEG and any matching SRT/VTT files.
 
 .PARAMETER ImportFromUnc
-    Kopierar filer från UNC-mappen till den lokala UnProcessed-mappen före bearbetning.
+    Copies files from the UNC folder to the local UnProcessed folder before processing.
 
 .PARAMETER DeleteUncAfterSuccess
-    Tar bort UNC-original först efter verifierad lokal behandling.
+    Deletes UNC originals only after verified local processing.
 
 .PARAMETER NoPause
-    Avslutar utan att vänta på tangenttryckning.
+    Exits without waiting for a key press.
 #>
 
 [CmdletBinding()]
@@ -67,9 +67,9 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-#region Grundinställningar
+#region Base settings
 $Script:AppName = 'MediaPrep MKV Toolkit'
-$Script:AppVersion = '0.11.52'
+$Script:AppVersion = '0.11.53'
 $Script:BuildDate = '2026-08-12'
 $Script:AppFolder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Script:Root = Split-Path -Parent $Script:AppFolder
@@ -103,9 +103,127 @@ $Script:EncoderCapabilitiesPath = $null
 $Script:ErrorFolder = $null
 $Script:ErrorQueuePath = $null
 $Script:StatisticsCurrentPath = $null
+$Script:L = [pscustomobject]@{}
+$Script:ResolvedLanguageCode = 'en-US'
 #endregion
 
-#region Hjälpfunktioner
+#region Runtime language
+$Script:LanguageSchemaVersion = 1
+$Script:RequiredLanguageFileVersion = '1.6.0'
+$Script:FallbackLanguageCulture = 'en-US'
+$Script:LanguageBase = [pscustomobject]@{}
+$Script:LanguageDocument = $null
+$Script:LanguageFileIsCurrent = $false
+
+function Get-LanguageProperty {
+    param([object]$Object,[string]$Name,[object]$Default=$null)
+    if($null-eq$Object){return $Default}
+    $property=$Object.PSObject.Properties[$Name]
+    if($null-eq$property){return $Default}
+    return $property.Value
+}
+function Normalize-LanguagePreference {
+    param([string]$Code)
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'}
+    $value=$Code.Trim()
+    switch($value.ToLowerInvariant()){
+        'system'{return 'system'}
+        'default'{return 'system'}
+        'en'{return 'en-US'}
+        'english'{return 'en-US'}
+        'en-us'{return 'en-US'}
+        'sv'{return 'sv-SE'}
+        'swedish'{return 'sv-SE'}
+        'svenska'{return 'sv-SE'}
+        'sv-se'{return 'sv-SE'}
+    }
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($value)).Name}catch{return $value}
+}
+function Get-LanguagePath {
+    param([string]$Culture)
+    return (Join-Path (Join-Path $Script:Root 'Languages') ("mediaprep.{0}.json" -f $Culture))
+}
+function Read-LanguageDocument {
+    param([string]$Path)
+    if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $null}
+    try{$doc=Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json}catch{return $null}
+    if($null-eq$doc){return $null}
+    try{$schema=[int](Get-LanguageProperty $doc 'SchemaVersion' -1)}catch{return $null}
+    if($schema-ne$Script:LanguageSchemaVersion){return $null}
+    $culture=[string](Get-LanguageProperty $doc 'Culture' '')
+    $version=[string](Get-LanguageProperty $doc 'LanguageFileVersion' '')
+    if([string]::IsNullOrWhiteSpace($culture)-or[string]::IsNullOrWhiteSpace($version)){return $null}
+    return $doc
+}
+function Get-InstalledLanguageDocuments {
+    $result=New-Object System.Collections.Generic.List[object]
+    $folder=Join-Path $Script:Root 'Languages'
+    foreach($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+        $doc=Read-LanguageDocument $file.FullName
+        if($null-eq$doc){continue}
+        $culture=[string](Get-LanguageProperty $doc 'Culture' '')
+        if([string]::IsNullOrWhiteSpace($culture)){continue}
+        $result.Add([pscustomobject]@{Path=$file.FullName;Culture=$culture;Document=$doc})
+    }
+    return @($result.ToArray())
+}
+function Get-SystemLanguageCode {
+    $installed=@(Get-InstalledLanguageDocuments)
+    $uiCulture=[Globalization.CultureInfo]::CurrentUICulture
+    foreach($entry in $installed){if([string]$entry.Culture -ieq $uiCulture.Name){return [string]$entry.Culture}}
+    foreach($entry in $installed){
+        try{
+            $entryCulture=[Globalization.CultureInfo]::GetCultureInfo([string]$entry.Culture)
+            if($entryCulture.TwoLetterISOLanguageName -ieq $uiCulture.TwoLetterISOLanguageName){return [string]$entry.Culture}
+        }catch{}
+    }
+    return $Script:FallbackLanguageCulture
+}
+function Initialize-RuntimeLanguage {
+    $requested='system'
+    foreach($settingsPath in @(
+        (Join-Path (Join-Path $Script:Root 'Data') 'mediaprep.preferences.json'),
+        (Join-Path (Join-Path $Script:Root 'Data') 'config.json')
+    )){
+        if(-not(Test-Path -LiteralPath $settingsPath -PathType Leaf)){continue}
+        try{
+            $doc=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8|ConvertFrom-Json
+            if($doc -and $doc.PSObject.Properties['Language'] -and -not[string]::IsNullOrWhiteSpace([string]$doc.Language)){
+                $requested=[string]$doc.Language
+                break
+            }
+        }catch{}
+    }
+    $requested=Normalize-LanguagePreference $requested
+    $baseDoc=Read-LanguageDocument (Get-LanguagePath $Script:FallbackLanguageCulture)
+    if($null-eq$baseDoc){$baseDoc=[pscustomobject]@{}}
+    $Script:LanguageBase=$baseDoc
+    $resolved=if($requested-eq'system'){Get-SystemLanguageCode}else{$requested}
+    $selectedDoc=Read-LanguageDocument (Get-LanguagePath $resolved)
+    if($null-eq$selectedDoc){$resolved=$Script:FallbackLanguageCulture;$selectedDoc=$baseDoc}
+    if($null-eq$selectedDoc){$selectedDoc=[pscustomobject]@{}}
+    $Script:L=$selectedDoc
+    $Script:LanguageDocument=$selectedDoc
+    $Script:ResolvedLanguageCode=$resolved
+    $Script:LanguageFileIsCurrent=([string](Get-LanguageProperty $selectedDoc 'LanguageFileVersion' '') -eq $Script:RequiredLanguageFileVersion)
+}
+function T {
+    param([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@())
+    $baseProperty=if($Script:LanguageBase){$Script:LanguageBase.PSObject.Properties[$Key]}else{$null}
+    $baseText=if($baseProperty -and -not[string]::IsNullOrWhiteSpace([string]$baseProperty.Value)){[string]$baseProperty.Value}else{$Fallback}
+    $property=if($Script:L){$Script:L.PSObject.Properties[$Key]}else{$null}
+    $value=if($property -and -not[string]::IsNullOrWhiteSpace([string]$property.Value)){[string]$property.Value}else{$baseText}
+    $safeArgs=@($FormatArgs)
+    if($safeArgs.Count-gt0){
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$safeArgs)}catch{}
+        if($value-ne$baseText){try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$baseText,$safeArgs)}catch{}}
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$Fallback,$safeArgs)}catch{return $Fallback}
+    }
+    return $value
+}
+#endregion
+
+#region Helper functions
 function Write-ColorLine {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
@@ -162,11 +280,11 @@ function Get-NvidiaDiagnosticSnapshot {
     if(-not $Script:VerboseLogging){return}
     try{
         $smi=Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
-        if($null -eq $smi){Write-VerboseDiagnostic 'nvidia-smi.exe hittades inte.';return}
+        if($null -eq $smi){Write-VerboseDiagnostic 'nvidia-smi.exe was not found.';return}
         $query='name,driver_version,pstate,temperature.gpu,utilization.gpu,utilization.encoder,clocks.current.graphics,clocks.current.memory,power.limit'
         $out=& $smi.Source --query-gpu=$query --format=csv,noheader 2>&1
         Write-VerboseDiagnostic ('GPU snapshot: {0}' -f (($out|ForEach-Object{[string]$_}) -join ' | '))
-    }catch{Write-VerboseDiagnostic ('GPU snapshot misslyckades: {0}' -f $_.Exception.Message)}
+    }catch{Write-VerboseDiagnostic ('GPU snapshot failed: {0}' -f $_.Exception.Message)}
 }
 
 function Get-FfmpegVersionDiagnostic {
@@ -174,7 +292,7 @@ function Get-FfmpegVersionDiagnostic {
     try{
         $v=& $Script:FFmpegPath -version 2>&1 | Select-Object -First 2
         Write-VerboseDiagnostic ('FFmpeg: {0}' -f (($v|ForEach-Object{[string]$_}) -join ' | '))
-    }catch{Write-VerboseDiagnostic ('FFmpeg-version kunde inte läsas: {0}' -f $_.Exception.Message)}
+    }catch{Write-VerboseDiagnostic ('FFmpeg version could not be read: {0}' -f $_.Exception.Message)}
 }
 
 function Join-CommandLineForDiagnostic {
@@ -193,7 +311,7 @@ function Show-Header {
     Write-ColorLine ('=' * 64) DarkCyan
     Write-ColorLine (' {0}' -f $Script:AppName) Cyan
     Write-ColorLine (' Version : {0}' -f $Script:AppVersion) Gray
-    Write-ColorLine (' Byggd   : {0}' -f $Script:BuildDate) Gray
+    Write-ColorLine (T 'RuntimeBuilt' ' Built   : {0}' @($Script:BuildDate)) Gray
     Write-ColorLine (' PowerShell: {0}' -f $PSVersionTable.PSVersion) DarkGray
     Write-ColorLine ('=' * 64) DarkCyan
     Write-Host ''
@@ -232,10 +350,10 @@ function Ensure-Directory {
 
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         New-Item -Path $Path -ItemType Directory -Force | Out-Null
-        Write-Status INFO ("Skapade mapp: {0}" -f $Path)
+        Write-Status INFO (T 'RuntimeFolderCreated' 'Created folder: {0}' @($Path))
     }
     else {
-        Write-Status OK ("Mapp finns: {0}" -f $Path)
+        Write-Status OK (T 'RuntimeFolderExists' 'Folder exists: {0}' @($Path))
     }
 }
 
@@ -258,7 +376,7 @@ function Read-JsonFile {
         return ($raw | ConvertFrom-Json)
     }
     catch {
-        Write-Status WARN ("Kunde inte läsa JSON-filen: {0}. Standardvärde används." -f $Path)
+        Write-Status WARN (T 'RuntimeJsonReadFailed' 'Could not read JSON file: {0}. Default value is used.' @($Path))
         return $DefaultValue
     }
 }
@@ -290,15 +408,15 @@ function Save-JsonFile {
 }
 #endregion
 
-#region Konfiguration och miljö
+#region Configuration and environment
 function Initialize-MediaPrep {
     if (-not (Test-Path -LiteralPath $Script:ConfigPath -PathType Leaf)) {
-        throw "config.json saknas: $Script:ConfigPath"
+        throw (T 'RuntimeConfigMissing' 'config.json is missing: {0}' @($Script:ConfigPath))
     }
 
     $Script:Config = Read-JsonFile -Path $Script:ConfigPath -DefaultValue $null
     if ($null -eq $Script:Config) {
-        throw 'config.json kunde inte läsas.'
+        throw (T 'RuntimeConfigUnreadable' 'config.json could not be read.')
     }
 
     $Script:SourceFolder = Get-FullPathFromConfig $Script:Config.SourceFolder
@@ -316,9 +434,9 @@ function Initialize-MediaPrep {
     $Script:LogFile = Join-Path $Script:LogFolder ("MediaPrep_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
     New-Item -Path $Script:LogFile -ItemType File -Force | Out-Null
 
-    Write-Status OK 'Konfigurationen är inläst.'
-    Write-Status INFO ("Källmapp: {0}" -f $Script:SourceFolder)
-    Write-Status INFO ("Målmapp : {0}" -f $Script:OutputFolder)
+    Write-Status OK (T 'RuntimeConfigLoaded' 'Configuration loaded.')
+    Write-Status INFO (T 'RuntimeSourceFolder' 'Source folder: {0}' @($Script:SourceFolder))
+    Write-Status INFO (T 'RuntimeOutputFolder' 'Output folder: {0}' @($Script:OutputFolder))
 
     $ffmpegConfigured = if ($Script:Config.PSObject.Properties['FFmpegPath']) { [string]$Script:Config.FFmpegPath } else { 'ffmpeg.exe' }
     $ffprobeConfigured = if ($Script:Config.PSObject.Properties['FFprobePath']) { [string]$Script:Config.FFprobePath } else { 'ffprobe.exe' }
@@ -357,17 +475,17 @@ function Initialize-MediaPrep {
 
     foreach ($tool in $requiredTools) {
         if (Test-Path -LiteralPath $tool.Path -PathType Leaf) {
-            Write-Status OK ("Verktyg hittades: {0}" -f $tool.Name)
+            Write-Status OK (T 'RuntimeToolFound' 'Tool found: {0}' @($tool.Name))
         }
         else {
-            Write-Status ERROR ("Verktyg saknas: {0}" -f $tool.Path)
-            throw "Nödvändigt verktyg saknas: $($tool.Name)"
+            Write-Status ERROR (T 'RuntimeToolMissing' 'Tool missing: {0}' @($tool.Path))
+            throw (T 'RuntimeRequiredToolMissing' 'Required tool is missing: {0}' @($tool.Name))
         }
     }
 }
 #endregion
 
-#region UNC-import och säker källrensning
+#region UNC import and safe source cleanup
 function Test-UncPath {
     param([string]$Path)
     return (-not [string]::IsNullOrWhiteSpace($Path) -and $Path.StartsWith('\\'))
@@ -460,9 +578,9 @@ function Update-QueueDashboardItem {
             if(-not [string]::IsNullOrWhiteSpace($RelativePath)){
                 $candidateRelative=[string]$candidate.RelativePath
                 if([string]::Equals($candidateRelative,$RelativePath,[System.StringComparison]::OrdinalIgnoreCase)){$target=$candidate;break}
-                # Efter muxning arbetar MediaPrep med .mkv medan inventeringen behåller
-                # den ursprungliga .ts/.mp4/.avi/.mpg/.mpeg-sökvägen. Matcha därför
-                # även samma relativa sökväg utan filändelse.
+                # After muxing MediaPrep works with .mkv while the inventory keeps
+                # the original .ts/.mp4/.avi/.mpg/.mpeg path. Therefore also match
+                # the same relative path without extension.
                 try{
                     $candidateKey=[IO.Path]::ChangeExtension($candidateRelative,$null)
                     $relativeKey=[IO.Path]::ChangeExtension([string]$RelativePath,$null)
@@ -487,7 +605,7 @@ function Update-QueueDashboardItem {
         $doc.updatedUtc=$now
         $doc.errors=[int]@($doc.items|Where-Object{[int]$_.QueueStage -ge 90}).Count
         Save-JsonFile -Path $dashboardPath -Value $doc
-        # Spegla köpostens aktuella tillstånd till sessionsstatistiken.
+        # Mirror the queue item's current state to session statistics.
         $sessionValues=@{}
         foreach($name in @('SourceSize','MuxedSize','EncodedSize','FinalSize','QueueStage','QueueStatus','SubtitleCount','ErrorMessage','CopyInStarted','CopyInCompleted','CopyBackStarted','CopyBackCompleted','MuxStarted','MuxCompleted','AnalysisCompleted','EncodeStarted','EncodeCompleted','CompletedUtc')){
             $prop=$target.PSObject.Properties[$name]
@@ -496,7 +614,7 @@ function Update-QueueDashboardItem {
         $sessionValues['Result']=if([int](Get-OptionalPropertyValue $target 'QueueStage' 0) -eq 10){'Completed'}elseif([int](Get-OptionalPropertyValue $target 'QueueStage' 0) -ge 90){'Error'}else{'Pending'}
         Update-StatisticsSessionFile -SourcePath ([string](Get-OptionalPropertyValue $target 'SourcePath' $SourcePath)) -RelativePath ([string](Get-OptionalPropertyValue $target 'RelativePath' $RelativePath)) -QueueRoot ([string](Get-OptionalPropertyValue $target 'Root' $UncSourcePath)) -Values $sessionValues
     } catch {
-        if($Script:VerboseLogging){Write-VerboseDiagnostic ('Ködashboard kunde inte uppdateras: {0}' -f $_.Exception.Message)}
+        if($Script:VerboseLogging){Write-VerboseDiagnostic ('Queue dashboard could not be updated: {0}' -f $_.Exception.Message)}
     }
 }
 
@@ -540,7 +658,7 @@ function Add-CopyStatistic {
             $sv['FinalSize']=$Bytes;$sv['CopyBackBytes']=$Bytes;$sv['CopyBackSeconds']=[Math]::Round($seconds,3);$sv['CopyBackMBps']=$record.MBps;$sv['CopyBackStarted']=$record.StartedUtc;$sv['CopyBackCompleted']=$record.EndedUtc
         }
         Update-StatisticsSessionFile -SourcePath $(if($Direction -eq 'In'){$File}else{''}) -RelativePath $relative -QueueRoot $UncSourcePath -Values $sv -CopyEvent $record
-        if($Script:VerboseLogging){Write-VerboseDiagnostic ('COPY {0}: fil={1}; bytes={2}; sek={3:N2}; snitt={4:N2} MB/s' -f $Direction,$File,$Bytes,$seconds,[double]$record.MBps)}
+        if($Script:VerboseLogging){Write-VerboseDiagnostic ('COPY {0}: file={1}; bytes={2}; sec={3:N2}; average={4:N2} MB/s' -f $Direction,$File,$Bytes,$seconds,[double]$record.MBps)}
     } catch {
         if($Script:VerboseLogging){Write-VerboseDiagnostic ('COPY-statistik kunde inte sparas: {0}' -f $_.Exception.Message)}
     }
@@ -560,7 +678,7 @@ function Copy-VerifiedFile {
     if (Test-Path -LiteralPath $Destination -PathType Leaf) {
         $existing = Get-Item -LiteralPath $Destination -ErrorAction Stop
         if ($existing.Length -eq $sourceInfo.Length) { return $existing }
-        Write-Status WARN ("Den lokala kopian är ofullständig eller har fel storlek och kopieras om: {0}" -f $Destination)
+        Write-Status WARN (T 'RuntimeLocalCopyInvalid' 'The local copy is incomplete or has the wrong size and will be copied again: {0}' @($Destination))
         Remove-Item -LiteralPath $Destination -Force -ErrorAction Stop
     }
 
@@ -568,7 +686,7 @@ function Copy-VerifiedFile {
     if (Test-Path -LiteralPath $temporary -PathType Leaf) {
         $temporaryInfo = Get-Item -LiteralPath $temporary -ErrorAction SilentlyContinue
         if ($null -ne $temporaryInfo) {
-            Write-Status WARN ("Tar bort tidigare ofullständig kopieringsfil ({0:N0} byte): {1}" -f $temporaryInfo.Length,$temporary)
+            Write-Status WARN (T 'RuntimeRemovingIncompleteCopy' 'Removing previous incomplete copy file ({0:N0} bytes): {1}' @($temporaryInfo.Length,$temporary))
         }
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
@@ -576,7 +694,7 @@ function Copy-VerifiedFile {
         Copy-Item -LiteralPath $Source -Destination $temporary -Force -ErrorAction Stop
         $copied = Get-Item -LiteralPath $temporary -ErrorAction Stop
         if ($copied.Length -ne $sourceInfo.Length) {
-            throw "Storlekskontrollen misslyckades vid kopiering: $Source"
+            throw "Size verification failed while copying: $Source"
         }
         Move-Item -LiteralPath $temporary -Destination $Destination -Force
         return (Get-Item -LiteralPath $Destination -ErrorAction Stop)
@@ -589,12 +707,12 @@ function Copy-VerifiedFile {
 function Import-UncMediaFiles {
     param([Parameter(Mandatory = $true)][string]$SourcePath)
 
-    if (-not (Test-UncPath -Path $SourcePath)) { throw 'UNC-sökvägen måste börja med \\.' }
-    if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { throw "UNC-mappen kunde inte nås: $SourcePath" }
+    if (-not (Test-UncPath -Path $SourcePath)) { throw (T 'RuntimeUncPathMustStart' 'UNC path must start with \\.' ) }
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { throw (T 'RuntimeUncFolderUnavailable' 'UNC folder could not be reached: {0}' @($SourcePath)) }
 
     Write-Host ''
     $formatText=($Script:SelectedVideoFormats | ForEach-Object {$_.TrimStart('.').ToUpperInvariant()}) -join '/'
-    Write-Status INFO ("Söker rekursivt efter {0} i UNC-mappen: {1}" -f $formatText,$SourcePath)
+    Write-Status INFO (T 'RuntimeSearchingUnc' 'Searching recursively for {0} in UNC folder: {1}' @($formatText,$SourcePath))
     $videos = @(Get-ChildItem -LiteralPath $SourcePath -File -Recurse -ErrorAction Stop | Where-Object { $Script:SelectedVideoFormats -contains $_.Extension.ToLowerInvariant() } | Sort-Object FullName)
     $records = New-Object System.Collections.Generic.List[object]
     $total = $videos.Count
@@ -602,7 +720,7 @@ function Import-UncMediaFiles {
     for ($i=0; $i -lt $total; $i++) {
         $video = $videos[$i]
         $relative = Get-RelativePath -BasePath $SourcePath -FullPath $video.FullName
-        $importPercent=[int](($i+1)*100/[Math]::Max(1,$total)); Write-Progress -Id 1 -Activity 'MediaPrep kontrollerar och kopierar från UNC' -Status ("{0} av {1} | {2} % | {3}" -f ($i+1),$total,$importPercent,$relative) -PercentComplete $importPercent
+        $importPercent=[int](($i+1)*100/[Math]::Max(1,$total)); Write-Progress -Id 1 -Activity (T 'RuntimeUncImportActivity' 'MediaPrep checking and copying from UNC') -Status (T 'RuntimeProgressCountPercent' '{0} of {1} | {2} % | {3}' @(($i+1),$total,$importPercent,$relative)) -PercentComplete $importPercent
         try {
             $localVideo = Join-Path $Script:SourceFolder $relative
             $outputRelative = [IO.Path]::ChangeExtension($relative,'.mkv')
@@ -623,8 +741,8 @@ function Import-UncMediaFiles {
 
             if ($resumeExistingOutput) {
                 Update-QueueDashboardItem -SourcePath $video.FullName -RelativePath $relative -QueueStage 4 -QueueStatus 'Muxed' -Values @{MuxedSize=[int64]$outputSizeBefore;FinalSize=[int64]$outputSizeBefore;MuxCompleted=(Get-Date).ToUniversalTime().ToString('o')}
-                $copyDisposition='MKV finns i Processed och lokal källa saknas; UNC-kopiering hoppas över'
-                Write-Status SKIP ("MKV finns redan i Processed; kopierar inte källfilen igen: {0}" -f $relative)
+                $copyDisposition='MKV exists in Processed and local source is missing; UNC copy skipped'
+                Write-Status SKIP (T 'RuntimeMkvAlreadyProcessed' 'MKV already exists in Processed; source is not copied again: {0}' @($relative))
                 $localVideoForRecord=''
             }
             else {
@@ -641,17 +759,17 @@ function Import-UncMediaFiles {
                 if(-not $hadCompleteLocalCopy){Add-CopyStatistic -File $video.FullName -Direction In -Bytes ([int64]$video.Length) -Started $copyInStarted -Ended $copyInEnded}
                 $localVideoForRecord=$localVideo
                 if ($hadCompleteLocalCopy) {
-                    $copyDisposition='Komplett lokal källa med samma storlek återanvändes'
-                    Write-Status SKIP ("Komplett fil finns redan i UnProcessed; kopieringen hoppas över: {0}" -f $relative)
+                    $copyDisposition='Complete local source with matching size was reused'
+                    Write-Status SKIP (T 'RuntimeCompleteSourceReused' 'Complete file already exists in UnProcessed; copying is skipped: {0}' @($relative))
                 }
                 else {
-                    $copyDisposition='Kopierad och storleksverifierad'
-                    Write-Status OK ("UNC-import klar: {0}" -f $relative)
+                    $copyDisposition='Copied and size-verified'
+                    Write-Status OK (T 'RuntimeUncImportComplete' 'UNC import complete: {0}' @($relative))
                 }
                 if ($resumeNeedsRemux) {
                     $Script:ResumeRemuxPaths[$localVideo.ToLowerInvariant()]=$true
-                    $copyDisposition += '; befintlig MKV ska muxas om eftersom lokal källa finns kvar'
-                    Write-Status WARN ("Både källfil och MKV finns; posten behandlas på nytt: {0}" -f $relative)
+                    $copyDisposition += '; existing MKV will be remuxed because local source still exists'
+                    Write-Status WARN (T 'RuntimeSourceAndMkvExist' 'Both source file and MKV exist; item will be processed again: {0}' @($relative))
                 }
             }
 
@@ -675,7 +793,7 @@ function Import-UncMediaFiles {
                 }
             }
 
-            # Vid återstart med färdig lokal MKV läses längden direkt från UNC-källan.
+            # On restart with a completed local MKV, duration is read directly from the UNC source.
             $durationSource = if ($resumeExistingOutput) { $video.FullName } else { $localVideo }
             $remoteOutputRelative=$outputRelative
             if($video.Extension.ToLowerInvariant() -eq '.mkv' -and -not [bool]$DeleteUncAfterSuccess){
@@ -710,7 +828,7 @@ function Import-UncMediaFiles {
         }
         catch {
             Update-QueueDashboardItem -SourcePath $video.FullName -RelativePath $relative -QueueStage 90 -QueueStatus 'Error' -Values @{ErrorMessage=$_.Exception.Message}
-            Write-Status ERROR ("UNC-import misslyckades: {0} - {1}" -f $relative,$_.Exception.Message)
+            Write-Status ERROR (T 'RuntimeUncImportFailed' 'UNC import failed: {0} - {1}' @($relative,$_.Exception.Message))
             $records.Add([PSCustomObject][ordered]@{
                 RelativePath=$relative;RemoteVideo=$video.FullName;RemoteVideoSizeBytes=[int64]$video.Length;RemoteVideoModifiedUtc=$video.LastWriteTimeUtc.ToString('o')
                 RemoteSubtitle='';RemoteSubtitleSizeBytes=0;RemoteSubtitleModifiedUtc='';LocalVideo='';LocalSubtitle='';ExpectedOutput='';RemoteOutput='';RunId=$Script:RunId
@@ -719,11 +837,11 @@ function Import-UncMediaFiles {
             })
         }
     }
-    Write-Progress -Id 1 -Activity 'MediaPrep kontrollerar och kopierar från UNC' -Completed
+    Write-Progress -Id 1 -Activity (T 'RuntimeUncImportActivity' 'MediaPrep checking and copying from UNC') -Completed
     Save-JsonFile -Path $Script:UncManifestPath -Value $records.ToArray()
     $report=Join-Path $Script:ReportFolder 'MediaPrep-UNC-import.csv'
     $records.ToArray() | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8 -Delimiter ';'
-    Write-Status OK ("UNC-importmanifest sparat: {0}" -f $Script:UncManifestPath)
+    Write-Status OK (T 'RuntimeUncManifestSaved' 'UNC import manifest saved: {0}' @($Script:UncManifestPath))
     return $records.ToArray()
 }
 
@@ -731,16 +849,16 @@ function Test-FinalOutputForUncCleanup {
     param([Parameter(Mandatory = $true)][object]$Record)
     $localVideo=[string](Get-OptionalPropertyValue -Object $Record -Name 'LocalVideo' -DefaultValue '')
     if (-not [string]::IsNullOrWhiteSpace($localVideo) -and (Test-Path -LiteralPath $localVideo -PathType Leaf)) {
-        return [PSCustomObject]@{Valid=$false;Reason='Lokal källfil finns kvar; behandlingen blev inte färdig.'}
+        return [PSCustomObject]@{Valid=$false;Reason='Local source file remains; processing did not complete.'}
     }
     $output=[string](Get-OptionalPropertyValue -Object $Record -Name 'ExpectedOutput' -DefaultValue '')
-    if ([string]::IsNullOrWhiteSpace($output)) { return [PSCustomObject]@{Valid=$false;Reason='Sökvägen till slutlig MKV saknas i importposten.'} }
-    if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { return [PSCustomObject]@{Valid=$false;Reason='Slutlig MKV saknas.'} }
+    if ([string]::IsNullOrWhiteSpace($output)) { return [PSCustomObject]@{Valid=$false;Reason='Path to final MKV is missing from import record.'} }
+    if (-not (Test-Path -LiteralPath $output -PathType Leaf)) { return [PSCustomObject]@{Valid=$false;Reason='Final MKV is missing.'} }
     $outInfo=Get-Item -LiteralPath $output -ErrorAction Stop
 
     $recordRunId=[string](Get-OptionalPropertyValue -Object $Record -Name 'RunId' -DefaultValue '')
     if ($recordRunId -ne $Script:RunId) {
-        return [PSCustomObject]@{Valid=$false;Reason='Importposten tillhör inte den aktuella körningen.'}
+        return [PSCustomObject]@{Valid=$false;Reason='Import record does not belong to the current run.'}
     }
 
     $existedBefore=[bool](Get-OptionalPropertyValue -Object $Record -Name 'OutputExistedBefore' -DefaultValue $false)
@@ -749,23 +867,23 @@ function Test-FinalOutputForUncCleanup {
         $modifiedBefore=[string](Get-OptionalPropertyValue -Object $Record -Name 'OutputModifiedBeforeUtc' -DefaultValue '')
         $resumeExisting=[bool](Get-OptionalPropertyValue -Object $Record -Name 'ResumeExistingOutput' -DefaultValue $false)
         if (-not $resumeExisting -and $outInfo.Length -eq $sizeBefore -and $outInfo.LastWriteTimeUtc.ToString('o') -eq $modifiedBefore) {
-            return [PSCustomObject]@{Valid=$false;Reason='En äldre lokal MKV med samma namn fanns redan och ändrades inte under denna körning.'}
+            return [PSCustomObject]@{Valid=$false;Reason='An older local MKV with the same name already existed and was not changed during this run.'}
         }
     }
 
     $sourceSize=[double]$Record.RemoteVideoSizeBytes
     $minRatio=[double]$Script:Config.UncMinimumFinalSizeRatio
     $maxRatio=[double]$Script:Config.UncMaximumFinalSizeRatio
-    if ($outInfo.Length -lt [int64]$Script:Config.MinimumOutputSizeBytes) { return [PSCustomObject]@{Valid=$false;Reason='Slutlig MKV är mindre än minimigränsen.'} }
+    if ($outInfo.Length -lt [int64]$Script:Config.MinimumOutputSizeBytes) { return [PSCustomObject]@{Valid=$false;Reason='Final MKV is smaller than the minimum size.'} }
     if ($sourceSize -gt 0 -and (($outInfo.Length/$sourceSize) -lt $minRatio -or ($outInfo.Length/$sourceSize) -gt $maxRatio)) {
-        return [PSCustomObject]@{Valid=$false;Reason=("Storleksförhållandet är orimligt: {0:N1} %." -f (($outInfo.Length/$sourceSize)*100))}
+        return [PSCustomObject]@{Valid=$false;Reason=("Size ratio is unreasonable: {0:N1} %." -f (($outInfo.Length/$sourceSize)*100))}
     }
     $sourceDuration=[double]$Record.SourceDurationSeconds
     $outputDuration=Get-MediaDurationSeconds -Path $output
-    if ($sourceDuration -le 0 -or $outputDuration -le 0) { return [PSCustomObject]@{Valid=$false;Reason='Speltiden kunde inte verifieras.'} }
+    if ($sourceDuration -le 0 -or $outputDuration -le 0) { return [PSCustomObject]@{Valid=$false;Reason='Duration could not be verified.'} }
     $allowed=[Math]::Max([double]$Script:Config.UncDurationToleranceSeconds,$sourceDuration*([double]$Script:Config.UncDurationTolerancePercent/100.0))
-    if ([Math]::Abs($sourceDuration-$outputDuration) -gt $allowed) { return [PSCustomObject]@{Valid=$false;Reason=("Speltiden avviker för mycket: källa {0:N1}s, mål {1:N1}s." -f $sourceDuration,$outputDuration)} }
-    return [PSCustomObject]@{Valid=$true;Reason='Storlek och speltid verifierade.'}
+    if ([Math]::Abs($sourceDuration-$outputDuration) -gt $allowed) { return [PSCustomObject]@{Valid=$false;Reason=("Duration differs too much: source {0:N1}s, output {1:N1}s." -f $sourceDuration,$outputDuration)} }
+    return [PSCustomObject]@{Valid=$true;Reason='Size and duration verified.'}
 }
 
 function Copy-FileWithProgress {
@@ -791,7 +909,7 @@ function Copy-FileWithProgress {
             $elapsed=((Get-Date)-$started).TotalSeconds
             $rate=if($elapsed -gt 0){$copied/$elapsed}else{0}
             $remaining=if($rate -gt 0){($totalBytes-$copied)/$rate}else{0}
-            $status=("{0} | {1:N1} / {2:N1} MB | {3} % | kvar cirka {4}" -f $StatusPrefix,($copied/1MB),($totalBytes/1MB),$percent,(Format-MediaTime $remaining))
+            $status=(T 'RuntimeCopyProgress' '{0} | {1:N1} / {2:N1} MB | {3} % | about {4} remaining' @($StatusPrefix,($copied/1MB),($totalBytes/1MB),$percent,(Format-MediaTime $remaining)))
             Write-Progress -Activity $Activity -Status $status -PercentComplete $percent
         }
         $output.Flush()
@@ -810,7 +928,7 @@ function Remove-EmptyLocalQueueFolders {
         foreach($folder in $folders){
             if(@(Get-ChildItem -LiteralPath $folder.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0){
                 Remove-Item -LiteralPath $folder.FullName -Force -ErrorAction SilentlyContinue
-                if(-not(Test-Path -LiteralPath $folder.FullName)){Write-Status INFO ("Tog bort tom lokal kömapp: {0}" -f $folder.FullName)}
+                if(-not(Test-Path -LiteralPath $folder.FullName)){Write-Status INFO (T 'RuntimeEmptyLocalQueueFolderRemoved' 'Removed empty local queue folder: {0}' @($folder.FullName))}
             }
         }
     }
@@ -819,7 +937,7 @@ function Remove-EmptyLocalQueueFolders {
 function Get-MediaStreamProbeSummary {
     param([Parameter(Mandatory=$true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [PSCustomObject]@{Success=$false;HasVideo=$false;HasAudio=$false;StreamTypes=@();Error='Filen saknas.'}
+        return [PSCustomObject]@{Success=$false;HasVideo=$false;HasAudio=$false;StreamTypes=@();Error='File is missing.'}
     }
     try {
         $jsonText=& $Script:FFprobePath -v error -show_entries stream=codec_type -of json -- $Path 2>&1
@@ -829,7 +947,7 @@ function Get-MediaStreamProbeSummary {
             return [PSCustomObject]@{Success=$false;HasVideo=$false;HasAudio=$false;StreamTypes=@();Error=("ffprobe exitkod {0}: {1}" -f $exit,$raw)}
         }
         if ([string]::IsNullOrWhiteSpace($raw)) {
-            return [PSCustomObject]@{Success=$false;HasVideo=$false;HasAudio=$false;StreamTypes=@();Error='ffprobe returnerade inget resultat.'}
+            return [PSCustomObject]@{Success=$false;HasVideo=$false;HasAudio=$false;StreamTypes=@();Error='ffprobe returned no result.'}
         }
         $doc=$raw | ConvertFrom-Json
         $types=@()
@@ -864,7 +982,7 @@ function Copy-FinalOutputBackToUnc {
         $remoteOutput=Join-Path $remoteFolder ([IO.Path]::GetFileNameWithoutExtension([string]$Record.RemoteVideo)+'.mkv')
     }
 
-    if (-not (Test-Path -LiteralPath $localOutput -PathType Leaf)) { throw 'Den lokala slutliga MKV-filen saknas.' }
+    if (-not (Test-Path -LiteralPath $localOutput -PathType Leaf)) { throw 'The local final MKV file is missing.' }
     $localInfo=Get-Item -LiteralPath $localOutput -ErrorAction Stop
 
     # MKV input can publish back to the exact original UNC path. Before any
@@ -876,7 +994,7 @@ function Copy-FinalOutputBackToUnc {
     if($publishesOverSource -and (Test-Path -LiteralPath $remoteOutput -PathType Leaf)){
         $currentRemote=Get-Item -LiteralPath $remoteOutput -ErrorAction Stop
         if($currentRemote.Length -ne [int64]$Record.RemoteVideoSizeBytes -or $currentRemote.LastWriteTimeUtc.ToString('o') -ne [string]$Record.RemoteVideoModifiedUtc){
-            throw 'UNC-MKV-källan har ändrats sedan importen och ersätts därför inte.'
+            throw (T 'RuntimeUncMkvSourceChanged' 'The UNC MKV source changed since import and will therefore not be replaced.')
         }
     }
 
@@ -889,25 +1007,25 @@ function Copy-FinalOutputBackToUnc {
     Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     try {
         $copyOutStarted=Get-Date
-        Copy-FileWithProgress -Source $localOutput -Destination $temporary -Activity 'MediaPrep återför MKV till UNC' -StatusPrefix ([string]$Record.RelativePath)
+        Copy-FileWithProgress -Source $localOutput -Destination $temporary -Activity (T 'RuntimeReturnMkvActivity' 'MediaPrep returning MKV to UNC') -StatusPrefix ([string]$Record.RelativePath)
         $copyOutEnded=Get-Date
         Add-CopyStatistic -File $remoteOutput -Direction Out -Bytes ([int64]$localInfo.Length) -Started $copyOutStarted -Ended $copyOutEnded
         $tempInfo=Get-Item -LiteralPath $temporary -ErrorAction Stop
-        if ($tempInfo.Length -ne $localInfo.Length) { throw 'Storleken på UNC-kopian stämmer inte med den lokala MKV-filen.' }
+        if ($tempInfo.Length -ne $localInfo.Length) { throw (T 'RuntimeUncCopySizeMismatch' 'The UNC copy size does not match the local MKV file.') }
 
         $localDuration=Get-MediaDurationSeconds -Path $localOutput
         $remoteDuration=Get-MediaDurationSeconds -Path $temporary
-        if ($localDuration -le 0 -or $remoteDuration -le 0) { throw 'Speltiden på UNC-kopian kunde inte läsas.' }
+        if ($localDuration -le 0 -or $remoteDuration -le 0) { throw (T 'RuntimeUncCopyDurationUnreadable' 'The duration of the UNC copy could not be read.') }
         $allowed=[Math]::Max([double]$Script:Config.UncDurationToleranceSeconds,$localDuration*([double]$Script:Config.UncDurationTolerancePercent/100.0))
-        if ([Math]::Abs($localDuration-$remoteDuration) -gt $allowed) { throw 'Speltiden på UNC-kopian avviker från den lokala MKV-filen.' }
+        if ([Math]::Abs($localDuration-$remoteDuration) -gt $allowed) { throw (T 'RuntimeUncCopyDurationMismatch' 'The duration of the UNC copy differs from the local MKV file.') }
 
-        # Verifiera strömmarna med ffprobe JSON. Den äldre csv/textkontrollen kunde
-        # feltolka giltiga MPEG/MPG -> MKV-filer som om videospår saknades.
+        # Verify streams with ffprobe JSON. The older CSV/text check could
+        # misinterpret valid MPEG/MPG -> MKV files as missing a video stream.
         $streamProbe=Get-MediaStreamProbeSummary -Path $temporary
-        if(-not $streamProbe.Success){throw ("ffprobe kunde inte verifiera UNC-kopian: {0}" -f $streamProbe.Error)}
-        if(-not $streamProbe.HasVideo){throw 'UNC-kopian verifierades men innehåller inget videospår.'}
-        if(-not $streamProbe.HasAudio){throw 'UNC-kopian verifierades men innehåller inget ljudspår.'}
-        if($Script:VerboseLogging){Write-VerboseDiagnostic ("UNC verifierad med ffprobe: {0} | streams={1}" -f $temporary,(@($streamProbe.StreamTypes)-join ','))}
+        if(-not $streamProbe.Success){throw ("ffprobe could not verify the UNC copy: {0}" -f $streamProbe.Error)}
+        if(-not $streamProbe.HasVideo){throw (T 'RuntimeUncCopyNoVideo' 'The UNC copy was verified but contains no video stream.')}
+        if(-not $streamProbe.HasAudio){throw (T 'RuntimeUncCopyNoAudio' 'The UNC copy was verified but contains no audio stream.')}
+        if($Script:VerboseLogging){Write-VerboseDiagnostic ("UNC verified with ffprobe: {0} | streams={1}" -f $temporary,(@($streamProbe.StreamTypes)-join ','))}
 
         if (Test-Path -LiteralPath $remoteOutput -PathType Leaf) {
             $existing=Get-Item -LiteralPath $remoteOutput -ErrorAction Stop
@@ -931,10 +1049,10 @@ function Copy-FinalOutputBackToUnc {
         else { Move-Item -LiteralPath $temporary -Destination $remoteOutput -Force }
 
         $published=Get-Item -LiteralPath $remoteOutput -ErrorAction Stop
-        if ($published.Length -ne $localInfo.Length) { throw 'Slutkontrollen av UNC-filstorleken misslyckades.' }
-        return [PSCustomObject]@{Success=$true;LocalOutput=$localOutput;RemoteOutput=$remoteOutput;SizeBytes=[int64]$published.Length;DurationSeconds=[Math]::Round($remoteDuration,3);Message='MKV återkopierad och verifierad'}
+        if ($published.Length -ne $localInfo.Length) { throw 'Final UNC file-size verification failed.' }
+        return [PSCustomObject]@{Success=$true;LocalOutput=$localOutput;RemoteOutput=$remoteOutput;SizeBytes=[int64]$published.Length;DurationSeconds=[Math]::Round($remoteDuration,3);Message='MKV returned and verified'}
     }
-    finally { Write-Progress -Activity 'MediaPrep återför MKV till UNC' -Completed; Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    finally { Write-Progress -Activity (T 'RuntimeReturnMkvActivity' 'MediaPrep returning MKV to UNC') -Completed; Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
 }
 
 function Publish-UncResultsAndCleanup {
@@ -946,7 +1064,7 @@ function Publish-UncResultsAndCleanup {
     $publishQueue=@($Records | Where-Object { $_.ImportSuccess })
     for($publishIndex=0;$publishIndex -lt $publishQueue.Count;$publishIndex++) {
         $record=$publishQueue[$publishIndex]
-        $publishPercent=[int](($publishIndex+1)*100/[Math]::Max(1,$publishQueue.Count)); Write-Progress -Id 2 -Activity 'MediaPrep återför köresultat till UNC' -Status ("{0} av {1} | {2} % | {3}" -f ($publishIndex+1),$publishQueue.Count,$publishPercent,$record.RelativePath) -PercentComplete $publishPercent
+        $publishPercent=[int](($publishIndex+1)*100/[Math]::Max(1,$publishQueue.Count)); Write-Progress -Id 2 -Activity (T 'RuntimeReturnQueueActivity' 'MediaPrep returning queue results to UNC') -Status (T 'RuntimeProgressCountPercent' '{0} of {1} | {2} % | {3}' @(($publishIndex+1),$publishQueue.Count,$publishPercent,$record.RelativePath)) -PercentComplete $publishPercent
         $success=$false;$deleted=0;$localRemoved=$false;$remoteOutput='';$message=''
         try {
             $check=Test-FinalOutputForUncCleanup -Record $record
@@ -955,7 +1073,7 @@ function Publish-UncResultsAndCleanup {
             Update-QueueDashboardItem -SourcePath ([string]$record.RemoteVideo) -RelativePath ([string]$record.RelativePath) -QueueStage 9 -QueueStatus 'CopyingToUNC' -Values @{CopyBackStarted=(Get-Date).ToUniversalTime().ToString('o')}
             $published=Copy-FinalOutputBackToUnc -Record $record
             $remoteOutput=[string]$published.RemoteOutput
-            Write-Status OK ("Färdig MKV återförd till UNC: {0}" -f $remoteOutput)
+            Write-Status OK (T 'RuntimeMkvReturnedToUnc' 'Completed MKV returned to UNC: {0}' @($remoteOutput))
 
             if ($DeleteOriginals) {
                 $remote=[string]$record.RemoteVideo
@@ -968,12 +1086,12 @@ function Publish-UncResultsAndCleanup {
                     # MKV input: Copy-FinalOutputBackToUnc has already kept or atomically
                     # replaced the original path with the verified final MKV. Deleting the
                     # source here would delete the newly published output.
-                    Write-Status OK ("MKV-källan ersattes säkert av verifierad slutfil: {0}" -f $record.RelativePath)
+                    Write-Status OK (T 'RuntimeMkvSourceSafelyReplaced' 'MKV source safely replaced by verified final file: {0}' @($record.RelativePath))
                 }
                 else{
-                    if (-not (Test-Path -LiteralPath $remote -PathType Leaf)) { throw 'UNC-videofilen finns inte längre.' }
+                    if (-not (Test-Path -LiteralPath $remote -PathType Leaf)) { throw (T 'RuntimeUncVideoMissing' 'The UNC video file no longer exists.') }
                     $remoteInfo=Get-Item -LiteralPath $remote -ErrorAction Stop
-                    if ($remoteInfo.Length -ne [int64]$record.RemoteVideoSizeBytes -or $remoteInfo.LastWriteTimeUtc.ToString('o') -ne [string]$record.RemoteVideoModifiedUtc) { throw 'UNC-videofilen har ändrats sedan importen och raderas därför inte.' }
+                    if ($remoteInfo.Length -ne [int64]$record.RemoteVideoSizeBytes -or $remoteInfo.LastWriteTimeUtc.ToString('o') -ne [string]$record.RemoteVideoModifiedUtc) { throw (T 'RuntimeUncVideoChangedNoDelete' 'The UNC video file changed since import and will therefore not be deleted.') }
                     Remove-Item -LiteralPath $remote -Force -ErrorAction Stop;$deleted++
 
                     $remoteSubtitle=[string]$record.RemoteSubtitle
@@ -981,41 +1099,41 @@ function Publish-UncResultsAndCleanup {
                         $subInfo=Get-Item -LiteralPath $remoteSubtitle -ErrorAction Stop
                         if ($subInfo.Length -eq [int64]$record.RemoteSubtitleSizeBytes -and $subInfo.LastWriteTimeUtc.ToString('o') -eq [string]$record.RemoteSubtitleModifiedUtc) {
                             Remove-Item -LiteralPath $remoteSubtitle -Force -ErrorAction Stop;$deleted++
-                        } else { Write-Status WARN ("UNC-undertexten ändrades och behölls: {0}" -f $remoteSubtitle) }
+                        } else { Write-Status WARN (T 'RuntimeUncSubtitleChangedKept' 'UNC subtitle changed and was kept: {0}' @($remoteSubtitle)) }
                     }
-                    Write-Status OK ("Tog bort gammal UNC-källa: {0}" -f $record.RelativePath)
+                    Write-Status OK (T 'RuntimeOldUncSourceRemoved' 'Removed old UNC source: {0}' @($record.RelativePath))
                 }
             }
 
             $localOutput=[string]$record.ExpectedOutput
             if ($localOutput -ne [string]$published.LocalOutput) {
-                throw 'Säkerhetskontrollen stoppade lokal borttagning: sökvägen matchar inte den publicerade filen.'
+                throw (T 'RuntimeSafetyPathMismatch' 'Safety check stopped local deletion: path does not match the published file.')
             }
             if (Test-Path -LiteralPath $localOutput -PathType Leaf) {
                 $localDeleteInfo=Get-Item -LiteralPath $localOutput -ErrorAction Stop
                 if ($localDeleteInfo.Length -ne [int64]$published.SizeBytes) {
-                    throw 'Säkerhetskontrollen stoppade lokal borttagning: filstorleken har ändrats efter återföringen.'
+                    throw (T 'RuntimeSafetySizeChanged' 'Safety check stopped local deletion: file size changed after return.')
                 }
                 Remove-Item -LiteralPath $localOutput -Force -ErrorAction Stop
                 $localRemoved=$true
-                Write-Status OK ("Tog bort lokal MKV efter verifierad återkopiering: {0}" -f $localOutput)
+                Write-Status OK (T 'RuntimeLocalMkvRemovedAfterReturn' 'Removed local MKV after verified return copy: {0}' @($localOutput))
             }
-            $success=$true;$message='MKV återkopierad och verifierad.'
+            $success=$true;$message='MKV returned and verified.'
             Update-QueueDashboardItem -SourcePath ([string]$record.RemoteVideo) -RelativePath ([string]$record.RelativePath) -QueueStage 10 -QueueStatus 'Completed' -Values @{FinalSize=[int64]$published.SizeBytes;CopyBackCompleted=(Get-Date).ToUniversalTime().ToString('o');CompletedUtc=(Get-Date).ToUniversalTime().ToString('o');ErrorMessage=$null}
-            if ($DeleteOriginals) {$message+=' UNC-original borttaget.'} else {$message+=' UNC-original behållet enligt inställning.'}
+            if ($DeleteOriginals) {$message+=' UNC original removed.'} else {$message+=' UNC original kept according to setting.'}
         }
         catch {
             $message=$_.Exception.Message
             Update-QueueDashboardItem -SourcePath ([string]$record.RemoteVideo) -RelativePath ([string]$record.RelativePath) -QueueStage 90 -QueueStatus 'Error' -Values @{ErrorMessage=$message;ErrorKind='Publish';ErrorPreviousStage=8;ErrorLocalPath=[string]$record.ExpectedOutput}
-            Write-Status WARN ("UNC-resultatet kunde inte slutföras: {0} - {1}" -f $record.RelativePath,$message)
+            Write-Status WARN (T 'RuntimeUncResultFailed' 'UNC result could not be completed: {0} - {1}' @($record.RelativePath,$message))
         }
         $results.Add([PSCustomObject][ordered]@{RelativePath=$record.RelativePath;Success=$success;RemoteOutput=$remoteOutput;OriginalsDeleted=$deleted;LocalMkvRemoved=$localRemoved;Message=$message;CompletedUtc=(Get-Date).ToUniversalTime().ToString('o')})
     }
-    Write-Progress -Id 2 -Activity 'MediaPrep återför köresultat till UNC' -Completed
+    Write-Progress -Id 2 -Activity (T 'RuntimeReturnQueueActivity' 'MediaPrep returning queue results to UNC') -Completed
     Remove-EmptyLocalQueueFolders -Records $Records
     $report=Join-Path $Script:ReportFolder 'MediaPrep-UNC-aterforing.csv'
     $results.ToArray() | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8 -Delimiter ';'
-    Write-Status OK ("UNC-återföringsrapport sparad: {0}" -f $report)
+    Write-Status OK (T 'RuntimeUncReturnReportSaved' 'UNC return report saved: {0}' @($report))
     return $results.ToArray()
 }
 
@@ -1028,7 +1146,7 @@ function Find-SubtitleForVideo {
     $baseName = $VideoFile.BaseName
     $folder = $VideoFile.DirectoryName
 
-    # SRT prioriteras om både SRT och VTT finns.
+    # SRT is preferred when both SRT and VTT exist.
     foreach ($extension in @('.srt', '.vtt')) {
         $candidate = Join-Path $folder ($baseName + $extension)
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
@@ -1036,7 +1154,7 @@ function Find-SubtitleForVideo {
         }
     }
 
-    # Fångar även filändelser med annan versalisering, t.ex. .SRT.
+    # Also catches extensions with different capitalization, e.g. .SRT.
     $matches = Get-ChildItem -LiteralPath $folder -File -ErrorAction SilentlyContinue | Where-Object {
         $_.BaseName -ieq $baseName -and $_.Extension.ToLowerInvariant() -in @('.srt', '.vtt')
     } | Sort-Object @{ Expression = { if ($_.Extension -ieq '.srt') { 0 } else { 1 } } }, Name
@@ -1052,44 +1170,44 @@ function Get-ActionState {
     )
 
     if ($Force) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Tvingad ommuxning' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Forced remux' }
     }
 
     $resumeKey = $VideoFile.FullName.ToLowerInvariant()
     if ($Script:ResumeRemuxPaths.ContainsKey($resumeKey)) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Tidigare körning blev inte färdig; muxas om' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Previous run did not finish; remux required' }
     }
 
     if (-not (Test-Path -LiteralPath $OutputFile -PathType Leaf)) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'MKV saknas' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'MKV missing' }
     }
 
     if (-not [bool]$Script:Config.SkipIfOutputExists) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'SkipIfOutputExists är avstängt' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'SkipIfOutputExists is disabled' }
     }
 
     if (-not [bool]$Script:Config.UseFileDateCheck) {
-        return [PSCustomObject]@{ NeedsProcessing = $false; Reason = 'MKV finns' }
+        return [PSCustomObject]@{ NeedsProcessing = $false; Reason = 'MKV exists' }
     }
 
     $outputInfo = Get-Item -LiteralPath $OutputFile
     if ($VideoFile.LastWriteTimeUtc -gt $outputInfo.LastWriteTimeUtc) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Videofilen är nyare än MKV' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Video file is newer than MKV' }
     }
 
     if ($null -ne $SubtitleFile -and $SubtitleFile.LastWriteTimeUtc -gt $outputInfo.LastWriteTimeUtc) {
-        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Undertexten är nyare än MKV' }
+        return [PSCustomObject]@{ NeedsProcessing = $true; Reason = 'Subtitle is newer than MKV' }
     }
 
-    return [PSCustomObject]@{ NeedsProcessing = $false; Reason = 'MKV är aktuell' }
+    return [PSCustomObject]@{ NeedsProcessing = $false; Reason = 'MKV is current' }
 }
 
 function Invoke-SourceFFprobe {
     param([Parameter(Mandatory = $true)][System.IO.FileInfo]$File)
 
     # Starta ffprobe via System.Diagnostics.Process. I Windows PowerShell 5.1 kan
-    # native stderr annars omvandlas till NativeCommandError när ErrorActionPreference
-    # är Stop, vilket tidigare kunde avbryta hela kön på en enda trasig fil.
+    # native stderr would otherwise become NativeCommandError when ErrorActionPreference
+    # is Stop, which previously could abort the entire queue on one broken file.
     $arguments = @(
         '-v','error',
         '-print_format','json',
@@ -1112,7 +1230,7 @@ function Invoke-SourceFFprobe {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
     try {
-        if (-not $process.Start()) { throw 'ffprobe kunde inte startas.' }
+        if (-not $process.Start()) { throw 'ffprobe could not be started.' }
         $raw = $process.StandardOutput.ReadToEnd()
         $stderr = $process.StandardError.ReadToEnd()
         $process.WaitForExit()
@@ -1123,15 +1241,15 @@ function Invoke-SourceFFprobe {
     }
 
     if ($exitCode -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
-        $detail = if (-not [string]::IsNullOrWhiteSpace($stderr)) { $stderr.Trim() } else { 'Ingen ffprobe-detalj.' }
-        throw ("ffprobe kunde inte analysera källfilen. Exitkod: {0}. {1}" -f $exitCode,$detail)
+        $detail = if (-not [string]::IsNullOrWhiteSpace($stderr)) { $stderr.Trim() } else { 'No ffprobe detail.' }
+        throw ("ffprobe could not analyze source file. Exit code: {0}. {1}" -f $exitCode,$detail)
     }
 
     $doc = $raw | ConvertFrom-Json
     $videoStreams = @($doc.streams | Where-Object { $_.codec_type -eq 'video' })
     $audioStreams = @($doc.streams | Where-Object { $_.codec_type -eq 'audio' })
     $subtitleStreams = @($doc.streams | Where-Object { $_.codec_type -eq 'subtitle' })
-    if ($videoStreams.Count -eq 0) { throw 'ffprobe hittade ingen videoström i källfilen.' }
+    if ($videoStreams.Count -eq 0) { throw 'ffprobe found no video stream in the source file.' }
 
     $video = $videoStreams[0]
     $duration = Convert-ToDoubleInvariant (Get-OptionalPropertyValue -Object $doc.format -Name 'duration' -DefaultValue 0)
@@ -1161,9 +1279,9 @@ function Invoke-SourceFFprobe {
         ProbedUtc = (Get-Date).ToUniversalTime().ToString('o')
     }
 
-    Write-Status INFO ("ffprobe källa: {0} | container={1} | video={2} | audio={3} | {4}x{5} | {6:N3} fps | {7:N1} min" -f $File.Name,$result.Container,$result.VideoCodec,$result.AudioCodecs,$result.Width,$result.Height,$result.FPS,($result.DurationSeconds/60.0))
+    Write-Status INFO (T 'RuntimeSourceProbeSummary' 'ffprobe source: {0} | container={1} | video={2} | audio={3} | {4}x{5} | {6:N3} fps | {7:N1} min' @($File.Name,$result.Container,$result.VideoCodec,$result.AudioCodecs,$result.Width,$result.Height,$result.FPS,($result.DurationSeconds/60.0)))
     if ($Script:VerboseLogging) {
-        Write-VerboseDiagnostic ("SOURCE PROBE: fil={0}; container={1}; video={2}; profile={3}; pixfmt={4}; resolution={5}x{6}; fps={7}; duration={8}; bitrate={9}; videoStreams={10}; audioTracks={11}; audio={12}; subtitleTracks={13}" -f $File.FullName,$result.Container,$result.VideoCodec,$result.VideoProfile,$result.PixelFormat,$result.Width,$result.Height,$result.FPS,$result.DurationSeconds,$result.Bitrate,$result.VideoStreams,$result.AudioTracks,$result.AudioCodecs,$result.SubtitleTracks)
+        Write-VerboseDiagnostic ("SOURCE PROBE: file={0}; container={1}; video={2}; profile={3}; pixfmt={4}; resolution={5}x{6}; fps={7}; duration={8}; bitrate={9}; videoStreams={10}; audioTracks={11}; audio={12}; subtitleTracks={13}" -f $File.FullName,$result.Container,$result.VideoCodec,$result.VideoProfile,$result.PixelFormat,$result.Width,$result.Height,$result.FPS,$result.DurationSeconds,$result.Bitrate,$result.VideoStreams,$result.AudioTracks,$result.AudioCodecs,$result.SubtitleTracks)
     }
     return $result
 }
@@ -1226,17 +1344,17 @@ function Scan-MediaLibrary {
         }
 
         $videoFiles = @($selectedFiles.ToArray())
-        Write-Status INFO ("All in one file list active. Selected files: {0}" -f $videoFiles.Count)
+        Write-Status INFO (T 'RuntimeAllInOneListActive' 'All in one file list active. Selected files: {0}' @($videoFiles.Count))
 
         if ($missingFiles.Count -gt 0) {
             foreach ($missingFile in $missingFiles) {
-                Write-Status WARN ("Selected file was not found and will be skipped: {0}" -f $missingFile)
+                Write-Status WARN (T 'RuntimeSelectedFileMissing' 'Selected file was not found and will be skipped: {0}' @($missingFile))
             }
         }
 
         if ($videoFiles.Count -eq 0) {
             if ($AllowEmptyIncludeList) {
-                Write-Status INFO 'All in one source files have already been processed. The empty source list is expected during the post-mux check.'
+                Write-Status INFO (T 'RuntimeAllInOneAlreadyProcessed' 'All in one source files have already been processed. The empty source list is expected during the post-mux check.')
             }
             else {
                 throw 'All in one contains no existing files matching the selected video formats.'
@@ -1252,7 +1370,7 @@ function Scan-MediaLibrary {
         $video = $videoFiles[$i]
         $percent = if ($total -gt 0) { [int](($i + 1) * 100 / $total) } else { 100 }
         $elapsed = (Get-Date) - $started
-        $etaText = 'Beräknar...'
+        $etaText = (T 'RuntimeCalculating' 'Calculating...')
         if ($i -ge 1) {
             $secondsPerItem = $elapsed.TotalSeconds / ($i + 1)
             $remainingSeconds = [Math]::Max(0, $secondsPerItem * ($total - ($i + 1)))
@@ -1260,17 +1378,17 @@ function Scan-MediaLibrary {
         }
 
         $relativeVideo = Get-RelativePath -BasePath $Script:SourceFolder -FullPath $video.FullName
-        Write-Progress -Activity 'MediaPrep skannar biblioteket' -Status ("{0} av {1}: {2} | ETA {3}" -f ($i + 1), $total, $relativeVideo, $etaText) -PercentComplete $percent
+        Write-Progress -Activity (T 'RuntimeScanActivity' 'MediaPrep scanning library') -Status (T 'RuntimeProgressCountEta' '{0} of {1}: {2} | ETA {3}' @(($i+1),$total,$relativeVideo,$etaText)) -PercentComplete $percent
 
         try {
             $sourceProbe = Invoke-SourceFFprobe -File $video
         }
         catch {
-            $probeReason = "Källfil kunde inte analyseras med ffprobe: {0}" -f $_.Exception.Message
+            $probeReason = "Source file could not be analyzed with ffprobe: {0}" -f $_.Exception.Message
             Write-Status ERROR ("{0}: {1}" -f $video.FullName,$probeReason)
 
-            # En trasig eller icke-läsbar lokal källfil får inte stoppa hela kön.
-            # Flytta den lokala arbetskopian till Error och fortsätt med nästa fil.
+            # A broken or unreadable local source file must not stop the entire queue.
+            # Move the local working copy to Error and continue with the next file.
             try {
                 $errorRelative = $relativeVideo
                 $errorPath = Join-Path $Script:ErrorFolder $errorRelative
@@ -1299,10 +1417,10 @@ function Scan-MediaLibrary {
                     TargetVideoBitrateKbps = 0
                 }
                 Save-ErrorQueueRecords -Records $existingErrorRecords
-                Write-Status WARN ("Flyttad till felkö efter ffprobe-fel: {0}" -f $errorRelative)
+                Write-Status WARN (T 'RuntimeMovedAfterFfprobeError' 'Moved to error queue after ffprobe error: {0}' @($errorRelative))
             }
             catch {
-                Write-Status ERROR ("Kunde inte flytta den felaktiga källfilen till felkön: {0}" -f $_.Exception.Message)
+                Write-Status ERROR (T 'RuntimeMoveInvalidSourceFailed' 'Could not move the invalid source file to the error queue: {0}' @($_.Exception.Message))
             }
 
             continue
@@ -1324,7 +1442,7 @@ function Scan-MediaLibrary {
         }
 
         $subtitlePath = $null
-        $subtitleType = 'Ingen'
+        $subtitleType = 'None'
         $subtitleModifiedUtc = $null
         if ($null -ne $subtitle) {
             $subtitlePath = $subtitle.FullName
@@ -1355,27 +1473,27 @@ function Scan-MediaLibrary {
         })
     }
 
-    Write-Progress -Activity 'MediaPrep skannar biblioteket' -Completed
+    Write-Progress -Activity (T 'RuntimeScanActivity' 'MediaPrep scanning library') -Completed
     return $results.ToArray()
 }
 #endregion
 
 
-#region Muxning
+#region Muxing
 function Convert-VttToTemporarySrt {
     param(
         [Parameter(Mandatory = $true)][string]$VttFile
     )
 
     $temporarySrt = Join-Path $Script:TempFolder ("{0}.srt" -f ([Guid]::NewGuid().ToString('N')))
-    Write-Status INFO ("Konverterar VTT till tillfällig SRT: {0}" -f (Split-Path -Leaf $VttFile))
+    Write-Status INFO (T 'RuntimeConvertingVtt' 'Converting VTT to temporary SRT: {0}' @((Split-Path -Leaf $VttFile)))
 
     & $Script:FFmpegPath -hide_banner -loglevel error -y -i $VttFile $temporarySrt 2>&1 | Out-Null
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $temporarySrt -PathType Leaf)) {
         Remove-Item -LiteralPath $temporarySrt -Force -ErrorAction SilentlyContinue
-        throw "VTT-konverteringen misslyckades med exitkod $exitCode."
+        throw "VTT conversion failed with exit code $exitCode."
     }
 
     return $temporarySrt
@@ -1412,7 +1530,7 @@ function Remove-SourceFilesAfterMux {
     }
 
     if (-not (Test-ValidMuxOutput -OutputFile $Item.OutputFile)) {
-        throw 'Källfilerna behölls eftersom den skapade MKV-filen saknas eller är för liten.'
+        throw 'Source files were kept because the created MKV is missing or too small.'
     }
 
     $filesToDelete = New-Object System.Collections.Generic.List[string]
@@ -1426,7 +1544,7 @@ function Remove-SourceFilesAfterMux {
         if (Test-Path -LiteralPath $filePath -PathType Leaf) {
             Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop
             $deletedFiles.Add($filePath)
-            Write-Status OK ("Tog bort källfil: {0}" -f $filePath)
+            Write-Status OK (T 'RuntimeSourceFileRemoved' 'Removed source file: {0}' @($filePath))
         }
     }
 
@@ -1445,7 +1563,7 @@ function Remove-EmptySourceFolders {
         $remaining = @(Get-ChildItem -LiteralPath $folder.FullName -Force -ErrorAction SilentlyContinue)
         if ($remaining.Count -eq 0) {
             Remove-Item -LiteralPath $folder.FullName -Force -ErrorAction SilentlyContinue
-            Write-Status INFO ("Tog bort tom mapp: {0}" -f $folder.FullName)
+            Write-Status INFO (T 'RuntimeEmptyFolderRemoved' 'Removed empty folder: {0}' @($folder.FullName))
         }
     }
 }
@@ -1495,17 +1613,17 @@ function Invoke-MuxItem {
         & $Script:MKVMergePath $arguments.ToArray() 2>&1 | Out-Null
         $exitCode = $LASTEXITCODE
 
-        # mkvmerge: 0 = klart, 1 = klart med varningar, 2+ = fel.
+        # mkvmerge: 0 = success, 1 = success with warnings, 2+ = error.
         if ($exitCode -gt 1 -or -not (Test-ValidMuxOutput -OutputFile $Item.OutputFile)) {
             Remove-Item -LiteralPath $Item.OutputFile -Force -ErrorAction SilentlyContinue
-            throw "mkvmerge misslyckades eller skapade en ogiltig MKV-fil. Exitkod: $exitCode."
+            throw "mkvmerge failed or created an invalid MKV file. Exit code: $exitCode."
         }
 
         $deletedFiles = @(Remove-SourceFilesAfterMux -Item $Item)
 
         return [PSCustomObject]@{
             Success = $true
-            Message = 'MKV skapad och verifierad'
+            Message = 'MKV created and verified'
             DeletedFiles = ($deletedFiles -join ' | ')
             DeletedCount = $deletedFiles.Count
         }
@@ -1552,10 +1670,10 @@ function Remove-CompletedFileFromIncludeList {
 
         $json = ConvertTo-Json -InputObject @($remaining.ToArray()) -Depth 5
         [System.IO.File]::WriteAllText($IncludeListPath, $json, (New-Object System.Text.UTF8Encoding($true)))
-        Write-Status INFO ("All in one-kön uppdaterad. Återstår: {0} filer." -f $remaining.Count)
+        Write-Status INFO (T 'RuntimeAllInOneQueueUpdated' 'All in one queue updated. Remaining: {0} files.' @($remaining.Count))
     }
     catch {
-        Write-Status WARN ("Kunde inte uppdatera All in one-kön efter färdig fil: {0}" -f $_.Exception.Message)
+        Write-Status WARN (T 'RuntimeAllInOneQueueUpdateFailed' 'Could not update All in one queue after completed file: {0}' @($_.Exception.Message))
     }
 }
 
@@ -1631,7 +1749,7 @@ function Invoke-MuxQueue {
     $started = Get-Date
 
     if ($total -eq 0) {
-        Write-Status OK 'Alla valda filer är redan aktuella. Ingen förberedelse/muxning behövs.'
+        Write-Status OK (T 'RuntimeAllFilesCurrent' 'All selected files are already current. No preparation/muxing is required.')
         return $results.ToArray()
     }
 
@@ -1639,7 +1757,7 @@ function Invoke-MuxQueue {
         $item = $queue[$i]
         $percent = [int](($i + 1) * 100 / $total)
         $elapsed = (Get-Date) - $started
-        $etaText = 'Beräknar...'
+        $etaText = (T 'RuntimeCalculating' 'Calculating...')
 
         if ($i -ge 1) {
             $secondsPerItem = $elapsed.TotalSeconds / ($i + 1)
@@ -1648,9 +1766,9 @@ function Invoke-MuxQueue {
         }
 
         $isDirectMkv=([string](Get-OptionalPropertyValue -Object $item -Name 'ProcessingKind' -DefaultValue 'Mux') -eq 'DirectMkv')
-        $activity=if($isDirectMkv){'MediaPrep förbereder MKV för analys'}else{'MediaPrep muxar till MKV'}
-        Write-Progress -Activity $activity -Status ("{0} av {1}: {2} | ETA {3}" -f ($i + 1), $total, $item.RelativePath, $etaText) -PercentComplete $percent
-        $queueMessage=if($isDirectMkv){"Förbereder MKV utan ommuxning: {0}" -f $item.RelativePath}else{"Muxar: {0}" -f $item.RelativePath}
+        $activity=if($isDirectMkv){T 'RuntimePrepareMkvActivity' 'MediaPrep preparing MKV for analysis'}else{T 'RuntimeMuxActivity' 'MediaPrep muxing to MKV'}
+        Write-Progress -Activity $activity -Status (T 'RuntimeProgressCountEta' '{0} of {1}: {2} | ETA {3}' @(($i+1),$total,$item.RelativePath,$etaText)) -PercentComplete $percent
+        $queueMessage=if($isDirectMkv){T 'RuntimePreparingMkvNoRemux' 'Preparing MKV without remuxing: {0}' @($item.RelativePath)}else{T 'RuntimeMuxingFile' 'Muxing: {0}' @($item.RelativePath)}
         Write-Status INFO $queueMessage
         $muxValues=@{MuxStarted=(Get-Date).ToUniversalTime().ToString('o')}
         if($item.PSObject.Properties['Probe'] -and $null -ne $item.Probe){$muxValues['Probe']=$item.Probe}
@@ -1664,7 +1782,7 @@ function Invoke-MuxQueue {
         if ($null -eq $result) {
             $result = [PSCustomObject]@{
                 Success = $false
-                Message = 'Muxfunktionen returnerade inget giltigt resultat.'
+                Message = 'Mux function returned no valid result.'
                 DeletedFiles = ''
                 DeletedCount = 0
             }
@@ -1674,12 +1792,12 @@ function Invoke-MuxQueue {
             $muxInfo=Get-Item -LiteralPath ([string]$item.OutputFile) -ErrorAction SilentlyContinue
             $muxBytes=if($null -ne $muxInfo){[int64]$muxInfo.Length}else{$null}
             Update-QueueDashboardItem -RelativePath ([string]$item.RelativePath) -QueueStage 4 -QueueStatus 'Muxed' -Values @{MuxedSize=$muxBytes;FinalSize=$muxBytes;MuxCompleted=(Get-Date).ToUniversalTime().ToString('o');ErrorMessage=$null}
-            Write-Status OK ("Klar: {0}" -f $item.OutputFile)
+            Write-Status OK (T 'RuntimeCompletedFile' 'Completed: {0}' @($item.OutputFile))
             Remove-CompletedFileFromIncludeList -CompletedFile ([string]$item.VideoFile)
         }
         else {
             Update-QueueDashboardItem -RelativePath ([string]$item.RelativePath) -QueueStage 90 -QueueStatus 'Error' -Values @{ErrorMessage=[string]$result.Message}
-            Write-Status ERROR ("Misslyckades: {0} - {1}" -f $item.RelativePath, $result.Message)
+            Write-Status ERROR (T 'RuntimeFailedFile' 'Failed: {0} - {1}' @($item.RelativePath,$result.Message))
         }
 
         $results.Add([PSCustomObject][ordered]@{
@@ -1694,14 +1812,14 @@ function Invoke-MuxQueue {
         })
     }
 
-    Write-Progress -Activity 'MediaPrep muxar/förbereder MKV' -Completed
+    Write-Progress -Activity (T 'RuntimeMuxPrepareActivity' 'MediaPrep muxing/preparing MKV') -Completed
     Remove-EmptySourceFolders
     return $results.ToArray()
 }
 #endregion
 
 
-#region Analys och rekommendationer
+#region Analysis and recommendations
 
 function Get-OptionalPropertyValue {
     param(
@@ -1822,20 +1940,20 @@ function Get-VideoRecommendation {
     $recommended = (-not $alreadyEfficient -and $ratioExceeded -and $savingEnough)
 
     if ($alreadyEfficient) {
-        $level = 'Ingen'
-        $reason = 'Videon använder redan HEVC/H.265 eller AV1.'
+        $level = 'None'
+        $reason = 'Video already uses HEVC/H.265 or AV1.'
     }
     elseif (-not $ratioExceeded) {
-        $level = 'Låg'
-        $reason = ('{0:N1} MB/min ligger inte över tröskeln {1:N1} MB/min.' -f $currentMBPerMinute,$thresholdMBPerMinute)
+        $level = 'Low'
+        $reason = ('{0:N1} MB/min does not exceed the threshold {1:N1} MB/min.' -f $currentMBPerMinute,$thresholdMBPerMinute)
     }
     elseif (-not $savingEnough) {
-        $level = 'Låg'
-        $reason = ('Uppskattad besparing {0:N1} % är lägre än minimikravet {1:N1} %.' -f $estimatedSavingPercent,$minimumSavingPercent)
+        $level = 'Low'
+        $reason = ('Estimated saving {0:N1} % is below the minimum requirement {1:N1} %.' -f $estimatedSavingPercent,$minimumSavingPercent)
     }
     else {
-        $level = 'Hög'
-        $reason = ('{0}: {1:N1} MB/min överstiger tröskeln {2:N1} MB/min. Uppskattad besparing {3:N1} %.' -f $mediaType,$currentMBPerMinute,$thresholdMBPerMinute,$estimatedSavingPercent)
+        $level = 'High'
+        $reason = ('{0}: {1:N1} MB/min exceeds the threshold {2:N1} MB/min. Estimated saving {3:N1} %.' -f $mediaType,$currentMBPerMinute,$thresholdMBPerMinute,$estimatedSavingPercent)
     }
 
     return [PSCustomObject]@{
@@ -1893,7 +2011,7 @@ function Invoke-FFprobeAnalysis {
     $subtitleStreams = @($probe.streams | Where-Object { $_.codec_type -eq 'subtitle' })
 
     if ($videoStream.Count -eq 0) {
-        throw 'Ingen videoström hittades.'
+        throw 'No video stream found.'
     }
 
     $video = $videoStream[0]
@@ -1912,7 +2030,7 @@ function Invoke-FFprobeAnalysis {
         $formatBitrate
     }
     elseif ($duration -gt 0 -and $File.Length -gt 0) {
-        # Beräkna ungefärlig total bitrate från filstorlek och speltid.
+        # Calculate approximate total bitrate from file size and duration.
         ($File.Length * 8.0) / $duration
     }
     else {
@@ -1978,7 +2096,7 @@ function Analyze-MkvLibrary {
         [AllowEmptyCollection()][string[]]$OnlyPaths = @()
     )
     Write-Host ''
-    Write-Status INFO 'Analyserar färdiga MKV-filer med ffprobe...'
+    Write-Status INFO (T 'RuntimeAnalyzingCompletedMkv' 'Analyzing completed MKV files with ffprobe...')
 
     if ($null -ne $OnlyPaths -and @($OnlyPaths).Count -gt 0) {
         $wanted = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -1994,7 +2112,7 @@ function Analyze-MkvLibrary {
             }
         }
         $mkvFiles = @($mkvList.ToArray() | Sort-Object FullName)
-        Write-Status INFO ("Köisolering aktiv: analyserar endast {0} MKV-fil(er) från aktuell UNC-kö." -f $mkvFiles.Count)
+        Write-Status INFO (T 'RuntimeAnalysisQueueIsolation' 'Queue isolation active: analyzing only {0} MKV file(s) from the current UNC queue.' @($mkvFiles.Count))
     }
     else {
         $mkvFiles = @(Get-ChildItem -LiteralPath $Script:OutputFolder -Filter '*.mkv' -File -Recurse -ErrorAction Stop |
@@ -2012,7 +2130,7 @@ function Analyze-MkvLibrary {
         $percent = if ($total -gt 0) { [int](($i + 1) * 100 / $total) } else { 100 }
         $relative = Get-RelativePath -BasePath $Script:OutputFolder -FullPath $file.FullName
         $elapsed = (Get-Date) - $started
-        $etaText = 'Beräknar...'
+        $etaText = (T 'RuntimeCalculating' 'Calculating...')
 
         if ($i -ge 1) {
             $secondsPerItem = $elapsed.TotalSeconds / ($i + 1)
@@ -2020,7 +2138,7 @@ function Analyze-MkvLibrary {
             $etaText = ([TimeSpan]::FromSeconds($remainingSeconds)).ToString('hh\:mm\:ss')
         }
 
-        Write-Progress -Activity 'MediaPrep analyserar MKV-filer' -Status ("{0} av {1}: {2} | ETA {3}" -f ($i + 1), $total, $relative, $etaText) -PercentComplete $percent
+        Write-Progress -Activity (T 'RuntimeAnalyzeActivity' 'MediaPrep analyzing MKV files') -Status (T 'RuntimeProgressCountEta' '{0} of {1}: {2} | ETA {3}' @(($i+1),$total,$relative,$etaText)) -PercentComplete $percent
 
         $cacheKey = $file.FullName
         $cached = $null
@@ -2045,11 +2163,11 @@ function Analyze-MkvLibrary {
         }
 
         try {
-            Write-Status INFO ("Analyserar: {0}" -f $relative)
+            Write-Status INFO (T 'RuntimeAnalyzingFile' 'Analyzing: {0}' @($relative))
             $results.Add((Invoke-FFprobeAnalysis -File $file))
         }
         catch {
-            Write-Status ERROR ("Analys misslyckades: {0} - {1}" -f $relative, $_.Exception.Message)
+            Write-Status ERROR (T 'RuntimeAnalysisFailed' 'Analysis failed: {0} - {1}' @($relative,$_.Exception.Message))
             $results.Add([PSCustomObject][ordered]@{
                 FullPath = $file.FullName
                 RelativePath = $relative
@@ -2072,7 +2190,7 @@ function Analyze-MkvLibrary {
                 AudioTracks = 0
                 SubtitleTracks = 0
                 Recommended = $false
-                RecommendationLevel = 'Fel'
+                RecommendationLevel = 'Error'
                 EstimatedSaving = ''
                 RecommendationReason = ''
                 MediaType = ''
@@ -2089,8 +2207,8 @@ function Analyze-MkvLibrary {
         }
     }
 
-    Write-Progress -Activity 'MediaPrep analyserar MKV-filer' -Completed
-    Write-Status OK ("Analys klar. Återanvända cacheposter: {0}" -f $cachedCount)
+    Write-Progress -Activity (T 'RuntimeAnalyzeActivity' 'MediaPrep analyzing MKV files') -Completed
+    Write-Status OK (T 'RuntimeAnalysisCompleted' 'Analysis completed. Reused cache entries: {0}' @($cachedCount))
     return $results.ToArray()
 }
 
@@ -2104,7 +2222,7 @@ function Save-AnalysisReports {
     $Results = @($Results)
     $cachePath = Join-Path $Script:DataFolder 'analysis-index.json'
     Save-JsonFile -Path $cachePath -Value $Results
-    Write-Status OK ("Analyscache sparad: {0}" -f $cachePath)
+    Write-Status OK (T 'RuntimeAnalysisCacheSaved' 'Analysis cache saved: {0}' @($cachePath))
 
     $allCsv = Join-Path $Script:ReportFolder 'MediaPrep-analys-alla.csv'
     $recommendedCsv = Join-Path $Script:ReportFolder 'Rekommenderad-omkodning.csv'
@@ -2136,30 +2254,30 @@ function Save-AnalysisReports {
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add('================================================================')
-    $lines.Add(' MediaPrep - Rekommenderad omkodning')
-    $lines.Add((' Skapad: {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
+    $lines.Add((T 'RuntimeRecommendationReportTitle' ' MediaPrep - Recommended encoding'))
+    $lines.Add((T 'RuntimeCreatedAt' ' Created: {0}' @((Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))))
     $lines.Add('================================================================')
-    $lines.Add(('Analyserade MKV-filer: {0}' -f $Results.Count))
-    $lines.Add(('Rekommenderade:        {0}' -f $recommended.Count))
-    $lines.Add(('Analysfel:              {0}' -f $errors.Count))
+    $lines.Add((T 'RuntimeAnalyzedMkvFiles' 'Analyzed MKV files: {0}' @($Results.Count)))
+    $lines.Add((T 'RuntimeRecommendedCount' 'Recommended:        {0}' @($recommended.Count)))
+    $lines.Add((T 'RuntimeAnalysisErrorsReport' 'Analysis errors:    {0}' @($errors.Count)))
     $lines.Add('')
 
     foreach ($item in $recommended | Sort-Object RecommendationLevel, RelativePath) {
-        $lines.Add(('Fil: {0}' -f $item.RelativePath))
-        $lines.Add(('Codec: {0} | Upplösning: {1} | Bitrate: {2} Mbps' -f $item.Codec, $item.Resolution, $item.BitrateMbps))
-        $lines.Add(('Storlek: {0} GB | Längd: {1}' -f $item.FileSizeGB, $item.Duration))
-        $lines.Add(('Rekommendation: {0} | Uppskattad besparing: {1}' -f $item.RecommendationLevel, $item.EstimatedSaving))
-        $lines.Add(('Orsak: {0}' -f $item.RecommendationReason))
+        $lines.Add((T 'RuntimeReportFile' 'File: {0}' @($item.RelativePath)))
+        $lines.Add((T 'RuntimeReportCodecResolutionBitrate' 'Codec: {0} | Resolution: {1} | Bitrate: {2} Mbps' @($item.Codec,$item.Resolution,$item.BitrateMbps)))
+        $lines.Add((T 'RuntimeReportSizeDuration' 'Size: {0} GB | Duration: {1}' @($item.FileSizeGB,$item.Duration)))
+        $lines.Add((T 'RuntimeReportRecommendationSaving' 'Recommendation: {0} | Estimated saving: {1}' @($item.RecommendationLevel,$item.EstimatedSaving)))
+        $lines.Add((T 'RuntimeReportReason' 'Reason: {0}' @($item.RecommendationReason)))
         $lines.Add('----------------------------------------------------------------')
     }
 
     if ($recommended.Count -eq 0) {
-        $lines.Add('Ingen fil rekommenderas för omkodning enligt nuvarande regler.')
+        $lines.Add((T 'RuntimeNoEncodingRecommended' 'No file is recommended for encoding under the current rules.'))
     }
 
     if ($errors.Count -gt 0) {
         $lines.Add('')
-        $lines.Add('Analysfel:')
+        $lines.Add((T 'RuntimeAnalysisErrorsHeading' 'Analysis errors:'))
         foreach ($item in $errors) {
             $lines.Add(('- {0}: {1}' -f $item.RelativePath, $item.AnalysisError))
         }
@@ -2167,9 +2285,9 @@ function Save-AnalysisReports {
 
     [System.IO.File]::WriteAllLines($recommendedTxt, $lines.ToArray(), (New-Object System.Text.UTF8Encoding($true)))
 
-    Write-Status OK ("Analysrapport sparad: {0}" -f $allCsv)
-    Write-Status OK ("Rekommendationsrapport sparad: {0}" -f $recommendedCsv)
-    Write-Status OK ("Text rapport sparad: {0}" -f $recommendedTxt)
+    Write-Status OK (T 'RuntimeAnalysisReportSaved' 'Analysis report saved: {0}' @($allCsv))
+    Write-Status OK (T 'RuntimeRecommendationReportSaved' 'Recommendation report saved: {0}' @($recommendedCsv))
+    Write-Status OK (T 'RuntimeTextReportSaved' 'Text report saved: {0}' @($recommendedTxt))
 }
 
 function Show-AnalysisSummary {
@@ -2188,20 +2306,20 @@ function Show-AnalysisSummary {
 
     Write-Host ''
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-ColorLine ' Analysresultat' Cyan
+    Write-ColorLine (T 'RuntimeAnalysisResultTitle' ' Analysis result') Cyan
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-Host (' MKV-filer analyserade.......: {0}' -f $Results.Count)
+    Write-Host (T 'RuntimeMkvFilesAnalyzed' ' MKV files analyzed..........: {0}' @($Results.Count))
     Write-Host (' MPEG-2......................: {0}' -f $mpeg2)
     Write-Host (' H.264........................: {0}' -f $h264)
     Write-Host (' HEVC........................: {0}' -f $hevc)
-    Write-ColorLine (' Rekommenderad omkodning.....: {0}' -f $recommended) Yellow
-    Write-ColorLine (' Analysfel....................: {0}' -f $errors) $(if ($errors -gt 0) { 'Red' } else { 'Green' })
+    Write-ColorLine (T 'RuntimeRecommendedEncodingCount' ' Recommended encoding........: {0}' @($recommended)) Yellow
+    Write-ColorLine (T 'RuntimeAnalysisErrorsCount' ' Analysis errors..............: {0}' @($errors)) $(if ($errors -gt 0) { 'Red' } else { 'Green' })
     Write-ColorLine ('=' * 64) DarkCyan
 }
 #endregion
 
 
-#region HEVC-omkodning (CPU / NVENC / QSV / AMF)
+#region HEVC encoding (CPU / NVENC / QSV / AMF)
 function Get-CurrentEncoderSignatureWorker {
     try {
         $ffmpegVersion=[string](& $Script:FFmpegPath -version 2>&1 | Select-Object -First 1)
@@ -2215,22 +2333,22 @@ function Get-CurrentEncoderSignatureWorker {
 }
 function Get-SelectedEncoderProfile {
     if(-not(Test-Path -LiteralPath $Script:EncoderCapabilitiesPath -PathType Leaf)){
-        throw 'CPU/GPU-kontrollen saknas. Kör kontrollen från Start Center innan omkodning.'
+        throw 'CPU/GPU verification is missing. Run the check from Start Center before encoding.'
     }
     $doc=Read-JsonFile -Path $Script:EncoderCapabilitiesPath -DefaultValue $null
-    if($null-eq$doc){throw 'encoder-capabilities.json kunde inte läsas.'}
+    if($null-eq$doc){throw 'encoder-capabilities.json could not be read.'}
     $savedSignature=[string](Get-OptionalPropertyValue -Object $doc -Name 'Signature' -DefaultValue '')
     $currentSignature=Get-CurrentEncoderSignatureWorker
     if([string]::IsNullOrWhiteSpace($savedSignature) -or [string]::IsNullOrWhiteSpace($currentSignature) -or -not [string]::Equals($savedSignature,$currentSignature,[StringComparison]::Ordinal)){
-        throw 'CPU/GPU-kontrollen är inaktuell. FFmpeg, GPU eller grafikdrivrutin har ändrats. Kör kontrollen på nytt.'
+        throw 'CPU/GPU verification is stale. FFmpeg, GPU, or graphics driver changed. Run the check again.'
     }
     $selected=$null
     foreach($enc in @(Get-OptionalPropertyValue -Object $doc -Name 'Encoders' -DefaultValue @())){
         if([string]$enc.Id -eq [string]$Script:EncoderId){$selected=$enc;break}
     }
-    if($null-eq$selected){throw ("Vald encoder finns inte i verifieringsfilen: {0}" -f $Script:EncoderId)}
+    if($null-eq$selected){throw ("Selected encoder is not present in the verification file: {0}" -f $Script:EncoderId)}
     if(-not [bool](Get-OptionalPropertyValue -Object $selected -Name 'Verified' -DefaultValue $false)){
-        throw ("Vald encoder är inte verifierad: {0}" -f [string]$selected.HardwareName)
+        throw ("Selected encoder is not verified: {0}" -f [string]$selected.HardwareName)
     }
     $backend=[string]$selected.Backend
     $encoder=[string]$selected.Encoder
@@ -2294,7 +2412,7 @@ function Add-SelectedEncoderArguments {
 
 function Get-TargetVideoBitrateKbps {
     param([Parameter(Mandatory=$true)][object]$Item)
-    if ([double]$Item.DurationSeconds -le 0) { throw 'Speltiden saknas.' }
+    if ([double]$Item.DurationSeconds -le 0) { throw 'Duration is missing.' }
 
     # TargetSizeMB is the desired total container size, including copied audio.
     # NVENC constrained-quality mode can overshoot its nominal average bitrate,
@@ -2372,14 +2490,14 @@ function Invoke-FfmpegWithProgress {
         [string]$RelativePath='',
         [int]$QueueIndex=1,
         [int]$QueueTotal=1,
-        [string]$ActivityLabel='MediaPrep omkodar HEVC',
+        [string]$ActivityLabel='MediaPrep encoding HEVC',
         [string]$EncoderBackend=''
     )
 
     $process=$null
     try {
         # Start-Process -RedirectStandardOutput kan buffra progressutdata i
-        # Windows PowerShell 5.1. Diagnostics.Process låter oss läsa varje
+        # Windows PowerShell 5.1. Diagnostics.Process lets us read each
         # key=value-rad direkt medan FFmpeg fortfarande arbetar.
         $fullArgs=@('-hide_banner','-loglevel','error','-nostats','-stats_period','1','-progress','pipe:1')+$Arguments
         $argumentLine=($fullArgs | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' '
@@ -2397,7 +2515,7 @@ function Invoke-FfmpegWithProgress {
         $process=New-Object System.Diagnostics.Process
         $process.StartInfo=$startInfo
         if($Script:VerboseLogging){Write-VerboseDiagnostic ('FFmpeg actual command: {0}' -f (Join-CommandLineForDiagnostic -Exe $Script:FFmpegPath -Arguments $fullArgs))}
-        if(-not $process.Start()){ throw 'FFmpeg-processen kunde inte startas.' }
+        if(-not $process.Start()){ throw 'FFmpeg process could not be started.' }
         if($Script:VerboseLogging){
             Write-VerboseDiagnostic ('FFmpeg PID={0}; PriorityClass={1}; Duration={2:N2}s; Queue={3}/{4}' -f $process.Id,$process.PriorityClass,$DurationSeconds,$QueueIndex,$QueueTotal)
         }
@@ -2425,7 +2543,7 @@ function Invoke-FfmpegWithProgress {
             $value=$line.Substring($separator+1)
             $values[$key]=$value
 
-            # Ett progressblock är komplett först när FFmpeg skriver progress=.
+            # A progress block is complete only when FFmpeg writes progress=.
             if($key -ne 'progress'){ continue }
 
             $processed=0.0
@@ -2457,17 +2575,17 @@ function Invoke-FfmpegWithProgress {
                 $stallWarned=$false
             }
             if(($now-$lastUiUpdate).TotalMilliseconds -ge 750 -or $value -eq 'end'){
-                $displaySpeed=if($speed -gt 0){('{0:N2}x' -f $speed)}else{'väntar'}
-                $etaText=if($speed -gt 0){Format-MediaTime $eta}else{'beräknas'}
-                $progressText=("{0} av {1}: {2}`n{3} / {4} | {5:N1} % | hastighet {6} | kvar cirka {7}" -f $QueueIndex,$QueueTotal,$RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$displaySpeed,$etaText)
+                $displaySpeed=if($speed -gt 0){('{0:N2}x' -f $speed)}else{'waiting'}
+                $etaText=if($speed -gt 0){Format-MediaTime $eta}else{'calculating'}
+                $progressText=(T 'RuntimeEncodingProgress' '{0} of {1}: {2}`n{3} / {4} | {5:N1} % | speed {6} | about {7} remaining' @($QueueIndex,$QueueTotal,$RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$displaySpeed,$etaText))
                 Write-Progress -Id 3 -Activity $ActivityLabel -Status $progressText -PercentComplete ([int][Math]::Round($percent))
                 $lastUiUpdate=$now
             }
 
             if(($now-$lastReport).TotalSeconds -ge 5 -and $processed -ne $lastProcessed){
-                $displaySpeed=if($speed -gt 0){('{0:N2}x' -f $speed)}else{'väntar'}
-                $etaText=if($speed -gt 0){Format-MediaTime $eta}else{'beräknas'}
-                Write-ProgressLogOnly ("{0} | {1} / {2} | {3:N1} % | hastighet {4} | kvar cirka {5}" -f $RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$displaySpeed,$etaText)
+                $displaySpeed=if($speed -gt 0){('{0:N2}x' -f $speed)}else{'waiting'}
+                $etaText=if($speed -gt 0){Format-MediaTime $eta}else{'calculating'}
+                Write-ProgressLogOnly (T 'RuntimeEncodingProgressLog' '{0} | {1} / {2} | {3:N1} % | speed {4} | about {5} remaining' @($RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$displaySpeed,$etaText))
                 $lastReport=$now
                 $lastProcessed=$processed
             }
@@ -2477,11 +2595,11 @@ function Invoke-FfmpegWithProgress {
                 $cpuDelta=[Math]::Max(0,$cpuNow-$lastDiagCpu)
                 $cpuEquivalent=($cpuDelta/$wallDelta)*100.0
                 $stallSeconds=[Math]::Max(0,($now-$lastAdvanceUtc).TotalSeconds)
-                Write-VerboseDiagnostic ('FFmpeg live: PID={0}; fil={1}; media={2}/{3}; percent={4:N1}; speed={5:N2}x; ETA={6}; CPUdelta={7:N2}s/{8:N1}s ({9:N1}% av en kärna); WorkingSet={10:N1} MB; Threads={11}; progress-still={12:N1}s' -f $process.Id,$RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$speed,(Format-MediaTime $eta),$cpuDelta,$wallDelta,$cpuEquivalent,($process.WorkingSet64/1MB),$process.Threads.Count,$stallSeconds)
+                Write-VerboseDiagnostic ('FFmpeg live: PID={0}; file={1}; media={2}/{3}; percent={4:N1}; speed={5:N2}x; ETA={6}; CPUdelta={7:N2}s/{8:N1}s ({9:N1}% of one core); WorkingSet={10:N1} MB; Threads={11}; progress-still={12:N1}s' -f $process.Id,$RelativePath,(Format-MediaTime $processed),(Format-MediaTime $DurationSeconds),$percent,$speed,(Format-MediaTime $eta),$cpuDelta,$wallDelta,$cpuEquivalent,($process.WorkingSet64/1MB),$process.Threads.Count,$stallSeconds)
                 if($EncoderBackend -eq 'NVENC'){ Get-NvidiaDiagnosticSnapshot }
                 if($stallSeconds -ge 20 -and -not $stallWarned){
-                    $backendHint=if($EncoderBackend -eq 'NVENC'){' Om CPUdelta också är 0 och NVENC=0/P8 väntar FFmpeg sannolikt i input/demux/decode/driver-pipelinen.'}else{''}
-                    Write-VerboseDiagnostic ('STALL WARNING: FFmpeg media progress har inte flyttats på {0:N1}s.{1}' -f $stallSeconds,$backendHint)
+                    $backendHint=if($EncoderBackend -eq 'NVENC'){' If CPUdelta is also 0 and NVENC=0/P8, FFmpeg is probably waiting in the input/demux/decode/driver pipeline.'}else{''}
+                    Write-VerboseDiagnostic ('STALL WARNING: FFmpeg media progress has not moved for {0:N1}s.{1}' -f $stallSeconds,$backendHint)
                     $stallWarned=$true
                 }
                 $lastDiagCpu=$cpuNow
@@ -2490,8 +2608,8 @@ function Invoke-FfmpegWithProgress {
             }
             $hardStallSeconds=[Math]::Max(0,($now-$lastAdvanceUtc).TotalSeconds)
             if($hardStallSeconds -ge 60 -and -not $process.HasExited){
-                Write-Status ERROR ("FFmpeg har stått still i {0:N0} sekunder vid {1}. Avbryter filen så kön kan fortsätta." -f $hardStallSeconds,(Format-MediaTime $processed))
-                if($Script:VerboseLogging){Write-VerboseDiagnostic ('STALL ABORT: PID={0}; fil={1}; media={2}; still={3:N1}s' -f $process.Id,$RelativePath,(Format-MediaTime $processed),$hardStallSeconds)}
+                Write-Status ERROR (T 'RuntimeFfmpegStalled' 'FFmpeg has been stalled for {0:N0} seconds at {1}. Aborting this file so the queue can continue.' @($hardStallSeconds,(Format-MediaTime $processed)))
+                if($Script:VerboseLogging){Write-VerboseDiagnostic ('STALL ABORT: PID={0}; file={1}; media={2}; still={3:N1}s' -f $process.Id,$RelativePath,(Format-MediaTime $processed),$hardStallSeconds)}
                 $stallAborted=$true
                 try{$process.Kill()}catch{}
                 break
@@ -2500,18 +2618,18 @@ function Invoke-FfmpegWithProgress {
             $values=@{}
         }
 
-        # StandardError läses efter stdout. Med -loglevel error är mängden liten,
-        # vilket undviker blockering men behåller användbara felmeddelanden.
+        # StandardError is read after stdout. With -loglevel error the amount is small,
+        # which avoids blocking while retaining useful error messages.
         $errors=$process.StandardError.ReadToEnd()
         $process.WaitForExit()
 
         if($null -ne $finalSnapshot -and $process.ExitCode -eq 0){
-            $finalSpeed=if($finalSnapshot.Speed -gt 0){('{0:N2}x' -f $finalSnapshot.Speed)}else{'okänd'}
-            Write-Progress -Id 3 -Activity $ActivityLabel -Status ("{0} av {1}: {2}`n{3} / {4} | 100,0 % | hastighet {5} | klar" -f $QueueIndex,$QueueTotal,$RelativePath,(Format-MediaTime $DurationSeconds),(Format-MediaTime $DurationSeconds),$finalSpeed) -PercentComplete 100
+            $finalSpeed=if($finalSnapshot.Speed -gt 0){('{0:N2}x' -f $finalSnapshot.Speed)}else{'unknown'}
+            Write-Progress -Id 3 -Activity $ActivityLabel -Status (T 'RuntimeEncodingProgressComplete' '{0} of {1}: {2}`n{3} / {4} | 100.0 % | speed {5} | complete' @($QueueIndex,$QueueTotal,$RelativePath,(Format-MediaTime $DurationSeconds),(Format-MediaTime $DurationSeconds),$finalSpeed)) -PercentComplete 100
         }
 
         $returnExitCode=if($stallAborted){408}else{[int]$process.ExitCode}
-        $returnErrorText=if($stallAborted){'FFmpeg stall: ingen mediaprogress på 60 sekunder.'}else{[string]$errors}
+        $returnErrorText=if($stallAborted){'FFmpeg stall: no media progress for 60 seconds.'}else{[string]$errors}
         return [PSCustomObject]@{ExitCode=$returnExitCode;ErrorText=$returnErrorText;Stalled=$stallAborted}
     }
     finally {
@@ -2527,7 +2645,7 @@ function Get-ErrorQueueRecords {
         $raw=Get-Content -LiteralPath $Script:ErrorQueuePath -Raw -Encoding UTF8
         if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
         return @($raw | ConvertFrom-Json)
-    } catch { Write-Status WARN ("Kunde inte läsa felkön: {0}" -f $_.Exception.Message); return @() }
+    } catch { Write-Status WARN (T 'RuntimeErrorQueueReadFailed' 'Could not read error queue: {0}' @($_.Exception.Message)); return @() }
 }
 
 function Save-ErrorQueueRecords {
@@ -2566,20 +2684,20 @@ function Add-ItemToErrorQueue {
         DurationSeconds=[double]$Item.DurationSeconds;TargetSizeMB=[int]$Item.TargetSizeMB;TargetVideoBitrateKbps=[int](Get-TargetVideoBitrateKbps -Item $Item)
     }
     Save-ErrorQueueRecords -Records $records
-    Write-Status WARN ("Flyttad till felkö: {0}" -f $relative)
+    Write-Status WARN (T 'RuntimeMovedToErrorQueue' 'Moved to error queue: {0}' @($relative))
     return $errorPath
 }
 
 function Invoke-ErrorQueueProcessing {
     $records=@(Get-ErrorQueueRecords)
-    if ($records.Count -eq 0) { Write-Status INFO 'Felkön är tom.'; return @() }
-    Write-Status INFO ("Bearbetar felkön: {0} fil(er). Avkodningsfel ignoreras." -f $records.Count)
+    if ($records.Count -eq 0) { Write-Status INFO (T 'RuntimeErrorQueueEmpty' 'The error queue is empty.'); return @() }
+    Write-Status INFO (T 'RuntimeProcessingErrorQueue' 'Processing error queue: {0} file(s). Decode errors are ignored.' @($records.Count))
     $remaining=New-Object System.Collections.Generic.List[object]
     $results=New-Object System.Collections.Generic.List[object]
     for($i=0;$i -lt $records.Count;$i++){
         $r=$records[$i]
         $errorPath=[string]$r.ErrorPath
-        if(-not(Test-Path -LiteralPath $errorPath -PathType Leaf)){Write-Status WARN ("Felkösfil saknas: {0}" -f $errorPath);continue}
+        if(-not(Test-Path -LiteralPath $errorPath -PathType Leaf)){Write-Status WARN (T 'RuntimeErrorQueueFileMissing' 'Error queue file is missing: {0}' @($errorPath));continue}
         $item=[PSCustomObject]@{
             FullPath=$errorPath;RelativePath=[string]$r.RelativePath;DurationSeconds=[double]$r.DurationSeconds;TargetSizeMB=[int]$r.TargetSizeMB
         }
@@ -2593,12 +2711,12 @@ function Invoke-ErrorQueueProcessing {
             $fixedInfo=Get-Item -LiteralPath $dest -ErrorAction SilentlyContinue
             $fixedBytes=if($null-ne$fixedInfo){[int64]$fixedInfo.Length}else{$null}
             Update-QueueDashboardItem -RelativePath ([string]$r.RelativePath) -QueueStage 7 -QueueStatus 'Encoded' -Values @{EncodedSize=$fixedBytes;FinalSize=$fixedBytes;EncodeCompleted=(Get-Date).ToUniversalTime().ToString('o');ErrorMessage=$null}
-            Write-Status OK ("Felkön klar: {0} -> återställd till Processed." -f [string]$r.RelativePath)
+            Write-Status OK (T 'RuntimeErrorQueueRecovered' 'Error queue completed: {0} -> restored to Processed.' @([string]$r.RelativePath))
             $results.Add($res)
         } else {
             $remaining.Add($r)
             Update-QueueDashboardItem -RelativePath ([string]$r.RelativePath) -QueueStage 92 -QueueStatus 'ErrorQueueFailed' -Values @{ErrorMessage=[string]$res.Message}
-            Write-Status ERROR ("Felkön misslyckades igen: {0} - {1}" -f [string]$r.RelativePath,$res.Message)
+            Write-Status ERROR (T 'RuntimeErrorQueueFailedAgain' 'Error queue failed again: {0} - {1}' @([string]$r.RelativePath,$res.Message))
         }
     }
     Save-ErrorQueueRecords -Records @($remaining.ToArray())
@@ -2626,35 +2744,35 @@ function Invoke-HevcEncodeItem {
         }else{
             Update-QueueDashboardItem -RelativePath ([string]$Item.RelativePath) -QueueStage 6 -QueueStatus 'Encoding' -Values @{EncodeStarted=(Get-Date).ToUniversalTime().ToString('o');ErrorMessage=$null}
         }
-        Write-Status INFO ("{0}: {1} | målvideo cirka {2} kbps | totalmål {3} MB | säkerhetsmarginal {4:P0}" -f $profile.Label,$Item.RelativePath,$targetVideoKbps,$Item.TargetSizeMB,[double]$Script:Config.EncodingTargetSafetyFactor)
+        Write-Status INFO (T 'RuntimeEncodingTarget' '{0}: {1} | target video approx. {2} kbps | total target {3} MB | safety margin {4:P0}' @($profile.Label,$Item.RelativePath,$targetVideoKbps,$Item.TargetSizeMB,[double]$Script:Config.EncodingTargetSafetyFactor))
         $args=New-Object System.Collections.Generic.List[string]
         foreach($arg in @('-hide_banner','-loglevel','warning','-y')){$args.Add([string]$arg)}
         $useDecodeTolerance=$Script:IgnoreDecodeErrors -or [bool]$ForceIgnoreDecodeErrors
         if($useDecodeTolerance){
             foreach($arg in @('-fflags','+discardcorrupt+genpts','-err_detect','ignore_err')){$args.Add([string]$arg)}
-            Write-Status WARN ("Ignorera avkodningsfel är aktivt för: {0}" -f $Item.RelativePath)
+            Write-Status WARN (T 'RuntimeIgnoreDecodeErrorsActive' 'Ignore decode errors is active for: {0}' @($Item.RelativePath))
         }
         Add-SelectedEncoderArguments -Arguments $args -Profile $profile -Source $source -TargetVideoKbps $targetVideoKbps -MaxRateKbps $maxRateKbps -BufferKbps $bufferKbps -QualityCQ $qualityCQ
         foreach($arg in @('-c:a','copy','-c:s','copy','-c:d','copy',$tempFile)){$args.Add([string]$arg)}
         $argsArray=$args.ToArray()
         if($Script:VerboseLogging){
-            Write-VerboseDiagnostic ('Encoder start: backend={0}; encoder={1}; hårdvara={2}; fil={3}; längd={4:N2}s; original={5:N1} MB; target={6} MB; video={7} kbps; maxrate={8} kbps; bufsize={9} kbps' -f $profile.Backend,$profile.Encoder,$profile.HardwareName,$Item.RelativePath,[double]$Item.DurationSeconds,($sourceInfo.Length/1MB),$Item.TargetSizeMB,$targetVideoKbps,$maxRateKbps,$bufferKbps)
+            Write-VerboseDiagnostic ('Encoder start: backend={0}; encoder={1}; hardware={2}; file={3}; duration={4:N2}s; original={5:N1} MB; target={6} MB; video={7} kbps; maxrate={8} kbps; bufsize={9} kbps' -f $profile.Backend,$profile.Encoder,$profile.HardwareName,$Item.RelativePath,[double]$Item.DurationSeconds,($sourceInfo.Length/1MB),$Item.TargetSizeMB,$targetVideoKbps,$maxRateKbps,$bufferKbps)
             Get-FfmpegVersionDiagnostic
             if([string]$profile.Backend-eq'NVENC'){Get-NvidiaDiagnosticSnapshot}
             Write-VerboseDiagnostic ('FFmpeg command: {0}' -f (Join-CommandLineForDiagnostic -Exe $Script:FFmpegPath -Arguments $argsArray))
         }
         $encodeStarted=Get-Date
-        $encodeRun=Invoke-FfmpegWithProgress -Arguments $argsArray -DurationSeconds ([double]$Item.DurationSeconds) -RelativePath ([string]$Item.RelativePath) -QueueIndex $QueueIndex -QueueTotal $QueueTotal -ActivityLabel ("MediaPrep omkodar med {0}" -f $profile.Label) -EncoderBackend ([string]$profile.Backend)
+        $encodeRun=Invoke-FfmpegWithProgress -Arguments $argsArray -DurationSeconds ([double]$Item.DurationSeconds) -RelativePath ([string]$Item.RelativePath) -QueueIndex $QueueIndex -QueueTotal $QueueTotal -ActivityLabel (T 'RuntimeEncodingWith' 'MediaPrep encoding with {0}' @($profile.Label)) -EncoderBackend ([string]$profile.Backend)
         if($Script:VerboseLogging){
             $encodeElapsed=(Get-Date)-$encodeStarted
             $averageSpeed=0.0;if($encodeElapsed.TotalSeconds-gt0){$averageSpeed=[double]$Item.DurationSeconds/$encodeElapsed.TotalSeconds}
-            Write-VerboseDiagnostic ('Encoder slut: backend={0}; fil={1}; exitkod={2}; verklig tid={3}; genomsnittlig media/realtid cirka {4:N2}x' -f $profile.Backend,$Item.RelativePath,[int]$encodeRun.ExitCode,$encodeElapsed.ToString('hh\:mm\:ss'),$averageSpeed)
+            Write-VerboseDiagnostic ('Encoder end: backend={0}; file={1}; exitcode={2}; real time={3}; average media/realtime approx {4:N2}x' -f $profile.Backend,$Item.RelativePath,[int]$encodeRun.ExitCode,$encodeElapsed.ToString('hh\:mm\:ss'),$averageSpeed)
             if([string]$profile.Backend-eq'NVENC'){Get-NvidiaDiagnosticSnapshot}
         }
         $exitCode=[int]$encodeRun.ExitCode
         if($exitCode-ne0 -or -not(Test-EncodedFile -Path $tempFile)){
             $detail=([string]$encodeRun.ErrorText).Trim();if(-not[string]::IsNullOrWhiteSpace($detail)){Write-Status ERROR $detail}
-            throw ("FFmpeg/{0} misslyckades. Exitkod: {1}" -f $profile.Backend,$exitCode)
+            throw ("FFmpeg/{0} failed. Exit code: {1}" -f $profile.Backend,$exitCode)
         }
 
         $newInfo=Get-Item -LiteralPath $tempFile
@@ -2662,9 +2780,9 @@ function Invoke-HevcEncodeItem {
         $actualSavingPercent=[Math]::Round(($savedBytes/[double]$sourceInfo.Length)*100,1)
         if($savedBytes-le0 -or $actualSavingPercent-lt$minimumSavingPercent){
             Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
-            $reason=if($savedBytes-le0){'Den kvalitetsstyrda HEVC-filen blev inte mindre än originalet.'}else{("Faktisk besparing {0} % understiger minimikravet {1} %." -f $actualSavingPercent,$minimumSavingPercent)}
+            $reason=if($savedBytes-le0){'The quality-controlled HEVC file was not smaller than the original.'}else{("Actual saving {0} % is below the minimum requirement {1} %." -f $actualSavingPercent,$minimumSavingPercent)}
             Update-QueueDashboardItem -RelativePath ([string]$Item.RelativePath) -QueueStage 7 -QueueStatus 'Encoded' -Values @{EncodedSize=$null;FinalSize=[int64]$sourceInfo.Length;EncodeCompleted=(Get-Date).ToUniversalTime().ToString('o')}
-            return [PSCustomObject]@{RelativePath=$Item.RelativePath;Success=$true;Replaced=$false;OriginalSizeMB=[Math]::Round($sourceInfo.Length/1MB,1);NewSizeMB=[Math]::Round($newInfo.Length/1MB,1);SavedMB=[Math]::Round($savedBytes/1MB,1);SavedPercent=$actualSavingPercent;TargetSizeMB=[int]$Item.TargetSizeMB;TargetVideoBitrateKbps=$targetVideoKbps;QualityCQ=$qualityCQ;EncoderBackend=$profile.Backend;EncoderName=$profile.Encoder;Message=("Originalet behölls. {0}" -f $reason);CompletedUtc=(Get-Date).ToUniversalTime().ToString('o')}
+            return [PSCustomObject]@{RelativePath=$Item.RelativePath;Success=$true;Replaced=$false;OriginalSizeMB=[Math]::Round($sourceInfo.Length/1MB,1);NewSizeMB=[Math]::Round($newInfo.Length/1MB,1);SavedMB=[Math]::Round($savedBytes/1MB,1);SavedPercent=$actualSavingPercent;TargetSizeMB=[int]$Item.TargetSizeMB;TargetVideoBitrateKbps=$targetVideoKbps;QualityCQ=$qualityCQ;EncoderBackend=$profile.Backend;EncoderName=$profile.Encoder;Message=("Original was kept. {0}" -f $reason);CompletedUtc=(Get-Date).ToUniversalTime().ToString('o')}
         }
 
         if(Test-Path -LiteralPath $backupFile){Remove-Item -LiteralPath $backupFile -Force}
@@ -2674,7 +2792,7 @@ function Invoke-HevcEncodeItem {
         $finalInfo=Get-Item -LiteralPath $source
         $saved=$sourceInfo.Length-$finalInfo.Length
         Update-QueueDashboardItem -RelativePath ([string]$Item.RelativePath) -QueueStage 7 -QueueStatus 'Encoded' -Values @{EncodedSize=[int64]$finalInfo.Length;FinalSize=[int64]$finalInfo.Length;EncodeCompleted=(Get-Date).ToUniversalTime().ToString('o');ErrorMessage=$null}
-        return [PSCustomObject]@{RelativePath=$Item.RelativePath;Success=$true;Replaced=$true;OriginalSizeMB=[Math]::Round($sourceInfo.Length/1MB,1);NewSizeMB=[Math]::Round($finalInfo.Length/1MB,1);SavedMB=[Math]::Round($saved/1MB,1);SavedPercent=[Math]::Round(($saved/[double]$sourceInfo.Length)*100,1);TargetSizeMB=[int]$Item.TargetSizeMB;TargetVideoBitrateKbps=$targetVideoKbps;QualityCQ=$qualityCQ;EncoderBackend=$profile.Backend;EncoderName=$profile.Encoder;Message=("Omkodad till HEVC med {0}" -f $profile.Backend);CompletedUtc=(Get-Date).ToUniversalTime().ToString('o')}
+        return [PSCustomObject]@{RelativePath=$Item.RelativePath;Success=$true;Replaced=$true;OriginalSizeMB=[Math]::Round($sourceInfo.Length/1MB,1);NewSizeMB=[Math]::Round($finalInfo.Length/1MB,1);SavedMB=[Math]::Round($saved/1MB,1);SavedPercent=[Math]::Round(($saved/[double]$sourceInfo.Length)*100,1);TargetSizeMB=[int]$Item.TargetSizeMB;TargetVideoBitrateKbps=$targetVideoKbps;QualityCQ=$qualityCQ;EncoderBackend=$profile.Backend;EncoderName=$profile.Encoder;Message=("Encoded to HEVC with {0}" -f $profile.Backend);CompletedUtc=(Get-Date).ToUniversalTime().ToString('o')}
     }catch{
         Update-QueueDashboardItem -RelativePath ([string]$Item.RelativePath) -QueueStage 90 -QueueStatus 'Error' -Values @{ErrorMessage=$_.Exception.Message}
         Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
@@ -2685,36 +2803,36 @@ function Invoke-HevcEncodeItem {
 function Invoke-RecommendedEncoding {
     param([Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$AnalysisResults)
     if (-not (Test-SelectedHevcEncoderAvailable)) {
-        throw 'Vald HEVC-encoder kunde inte startas. Kör CPU/GPU-kontrollen på nytt och välj en verifierad encoder.'
+        throw 'Selected HEVC encoder could not be started. Run CPU/GPU verification again and select a verified encoder.'
     }
     $profile=Get-SelectedEncoderProfile
     $queue=@($AnalysisResults | Where-Object { $_.Recommended -and $_.TargetSizeMB -gt 0 })
     $results=New-Object System.Collections.Generic.List[object]
     for ($i=0;$i -lt $queue.Count;$i++) {
         $item=$queue[$i]
-        Write-Progress -Id 3 -Activity ("MediaPrep omkodar med {0}" -f $profile.Label) -Status ("{0} av {1}: {2}`nStartar FFmpeg och väntar på progressdata..." -f ($i+1),$queue.Count,$item.RelativePath) -PercentComplete 0
+        Write-Progress -Id 3 -Activity (T 'RuntimeEncodingWith' 'MediaPrep encoding with {0}' @($profile.Label)) -Status (T 'RuntimeStartingFfmpegProgress' '{0} of {1}: {2}`nStarting FFmpeg and waiting for progress data...' @(($i+1),$queue.Count,$item.RelativePath)) -PercentComplete 0
         $result=Invoke-HevcEncodeItem -Item $item -QueueIndex ($i+1) -QueueTotal $queue.Count
         $results.Add($result)
         if (-not $result.Success) {
-            Write-Status ERROR ("Omkodning misslyckades: {0} - {1}" -f $result.RelativePath,$result.Message)
-            try{[void](Add-ItemToErrorQueue -Item $item -Reason ([string]$result.Message))}catch{Write-Status ERROR ("Kunde inte lägga filen i felkön: {0}" -f $_.Exception.Message)}
+            Write-Status ERROR (T 'RuntimeEncodingFailed' 'Encoding failed: {0} - {1}' @($result.RelativePath,$result.Message))
+            try{[void](Add-ItemToErrorQueue -Item $item -Reason ([string]$result.Message))}catch{Write-Status ERROR (T 'RuntimeAddToErrorQueueFailed' 'Could not add file to error queue: {0}' @($_.Exception.Message))}
         }
         elseif ($result.Replaced) {
-            Write-Status OK ("Omkodad: {0} | {1} MB -> {2} MB | sparade {3} % | {4}" -f $result.RelativePath,$result.OriginalSizeMB,$result.NewSizeMB,$result.SavedPercent,$profile.Label)
+            Write-Status OK (T 'RuntimeEncodedFile' 'Encoded: {0} | {1} MB -> {2} MB | saved {3} % | {4}' @($result.RelativePath,$result.OriginalSizeMB,$result.NewSizeMB,$result.SavedPercent,$profile.Label))
         }
         else {
-            Write-Status WARN ("Ingen användbar besparing: {0} - {1}" -f $result.RelativePath,$result.Message)
+            Write-Status WARN (T 'RuntimeNoUsefulSaving' 'No useful saving: {0} - {1}' @($result.RelativePath,$result.Message))
         }
     }
-    Write-Progress -Id 3 -Activity ("MediaPrep omkodar med {0}" -f $profile.Label) -Completed
+    Write-Progress -Id 3 -Activity (T 'RuntimeEncodingWith' 'MediaPrep encoding with {0}' @($profile.Label)) -Completed
     $reportPath=Join-Path $Script:ReportFolder 'MediaPrep-omkodning.csv'
     $results.ToArray() | Export-Csv -LiteralPath $reportPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
-    Write-Status OK ("Omkodningsrapport sparad: {0}" -f $reportPath)
+    Write-Status OK (T 'RuntimeEncodingReportSaved' 'Encoding report saved: {0}' @($reportPath))
     return $results.ToArray()
 }
 #endregion
 
-#region Rapport och index
+#region Reports and indexes
 function Save-ScanResults {
     param(
         [Parameter(Mandatory = $true)]
@@ -2726,7 +2844,7 @@ function Save-ScanResults {
 
     $indexPath = Join-Path $Script:DataFolder 'index.json'
     Save-JsonFile -Path $indexPath -Value $itemsArray
-    Write-Status OK ("Index sparat: {0}" -f $indexPath)
+    Write-Status OK (T 'RuntimeIndexSaved' 'Index saved: {0}' @($indexPath))
 
     $csvPath = Join-Path $Script:ReportFolder 'MediaPrep-skanning.csv'
     if ($itemsArray.Count -gt 0) {
@@ -2743,7 +2861,7 @@ function Save-ScanResults {
         )
     }
 
-    Write-Status OK ("Skanningsrapport sparad: {0}" -f $csvPath)
+    Write-Status OK (T 'RuntimeScanReportSaved' 'Scan report saved: {0}' @($csvPath))
 }
 
 function Save-MuxResults {
@@ -2756,7 +2874,7 @@ function Save-MuxResults {
     $Results = @($Results)
     $csvPath = Join-Path $Script:ReportFolder 'MediaPrep-muxning.csv'
     $Results | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
-    Write-Status OK ("Muxningsrapport sparad: {0}" -f $csvPath)
+    Write-Status OK (T 'RuntimeMuxReportSaved' 'Mux report saved: {0}' @($csvPath))
 }
 
 function Show-MuxSummary {
@@ -2774,11 +2892,11 @@ function Show-MuxSummary {
 
     Write-Host ''
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-ColorLine ' Muxningsresultat' Cyan
+    Write-ColorLine (T 'RuntimeMuxResultTitle' ' Mux result') Cyan
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-ColorLine (' MKV skapade...............: {0}' -f $successCount) Green
-    Write-ColorLine (' Misslyckade................: {0}' -f $failedCount) $(if ($failedCount -gt 0) { 'Red' } else { 'Green' })
-    Write-ColorLine (' Källfiler borttagna........: {0}' -f $deletedCount) Yellow
+    Write-ColorLine (T 'RuntimeMkvCreatedCount' ' MKV created..................: {0}' @($successCount)) Green
+    Write-ColorLine (T 'RuntimeFailedCount' ' Failed.......................: {0}' @($failedCount)) $(if ($failedCount -gt 0) { 'Red' } else { 'Green' })
+    Write-ColorLine (T 'RuntimeSourceFilesRemovedCount' ' Source files removed.........: {0}' @($deletedCount)) Yellow
     Write-ColorLine ('=' * 64) DarkCyan
 }
 
@@ -2798,15 +2916,15 @@ function Show-Summary {
     $mkvCount = @($Items | Where-Object { $_.VideoExtension -eq '.mkv' }).Count
     $srtCount = @($Items | Where-Object { $_.SubtitleType -eq 'SRT' }).Count
     $vttCount = @($Items | Where-Object { $_.SubtitleType -eq 'VTT' }).Count
-    $noSubtitle = @($Items | Where-Object { $_.SubtitleType -eq 'Ingen' }).Count
+    $noSubtitle = @($Items | Where-Object { $_.SubtitleType -eq 'None' }).Count
     $pending = @($Items | Where-Object { $_.NeedsProcessing }).Count
     $current = @($Items | Where-Object { -not $_.NeedsProcessing }).Count
 
     Write-Host ''
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-ColorLine ' Skanningsresultat' Cyan
+    Write-ColorLine (T 'RuntimeScanResultTitle' ' Scan result') Cyan
     Write-ColorLine ('=' * 64) DarkCyan
-    Write-Host (' Videofiler totalt........: {0}' -f $Items.Count)
+    Write-Host (T 'RuntimeVideoFilesTotal' ' Video files total...........: {0}' @($Items.Count))
     Write-Host (' TS.......................: {0}' -f $tsCount)
     Write-Host (' MP4......................: {0}' -f $mp4Count)
     Write-Host (' AVI......................: {0}' -f $aviCount)
@@ -2814,46 +2932,47 @@ function Show-Summary {
     Write-Host (' MPEG.....................: {0}' -f $mpegCount)
     Write-Host (' MKV......................: {0}' -f $mkvCount)
     Write-Host ''
-    Write-Host (' Med SRT..................: {0}' -f $srtCount)
-    Write-Host (' Med VTT..................: {0}' -f $vttCount)
-    Write-Host (' Utan undertext............: {0}' -f $noSubtitle)
+    Write-Host (T 'RuntimeWithSrt' ' With SRT....................: {0}' @($srtCount))
+    Write-Host (T 'RuntimeWithVtt' ' With VTT....................: {0}' @($vttCount))
+    Write-Host (T 'RuntimeWithoutSubtitle' ' Without subtitle............: {0}' @($noSubtitle))
     Write-Host ''
-    Write-ColorLine (' Behöver bearbetas.........: {0}' -f $pending) Yellow
-    Write-ColorLine (' Redan aktuella............: {0}' -f $current) Green
+    Write-ColorLine (T 'RuntimeNeedsProcessing' ' Needs processing............: {0}' @($pending)) Yellow
+    Write-ColorLine (T 'RuntimeAlreadyCurrent' ' Already current.............: {0}' @($current)) Green
     Write-ColorLine ('=' * 64) DarkCyan
 
     if ($pending -gt 0) {
         Write-Host ''
-        Write-ColorLine ' Filer som behöver bearbetas:' Yellow
+        Write-ColorLine (T 'RuntimeFilesNeedingProcessing' ' Files needing processing:') Yellow
         foreach ($item in ($Items | Where-Object { $_.NeedsProcessing } | Select-Object -First 20)) {
             Write-Host ('  - {0} [{1}]' -f $item.RelativePath, $item.Reason)
         }
         if ($pending -gt 20) {
-            Write-Host ('  ... och ytterligare {0} filer. Se CSV-rapporten.' -f ($pending - 20))
+            Write-Host (T 'RuntimeMoreFilesSeeCsv' '  ... and {0} more files. See the CSV report.' @(($pending-20)))
         }
     }
 
     Write-Host ''
-    Write-Status INFO ('Version {0} muxar, analyserar, omkodar och återför UNC-resultat.' -f $Script:AppVersion)
+    Write-Status INFO (T 'RuntimeVersionCapabilities' 'Version {0} muxes, analyzes, encodes and returns UNC results.' @($Script:AppVersion))
 }
 #endregion
 
-#region Huvudprogram
+#region Main program
 try {
+    Initialize-RuntimeLanguage
     Show-Header
-if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID={0}; PowerShell={1}; RunId={2}' -f $PID,$PSVersionTable.PSVersion,$Script:RunId)}
+if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging enabled. PID={0}; PowerShell={1}; RunId={2}' -f $PID,$PSVersionTable.PSVersion,$Script:RunId)}
     Initialize-MediaPrep
     if ($RebuildIndex) {
         Save-JsonFile -Path (Join-Path $Script:DataFolder 'index.json') -Value @()
         Save-JsonFile -Path (Join-Path $Script:DataFolder 'analysis-index.json') -Value @()
-        Write-Status WARN 'Tidigare index har återställts.'
+        Write-Status WARN (T 'RuntimeIndexesReset' 'Previous indexes were reset.')
     }
     $uncRecords=@()
     $currentQueueSourcePaths=@()
     $currentQueueOutputPaths=@()
     $queueIncludeListPath=''
     if ($ImportFromUnc) {
-        if ($AnalyzeOnly -or $EncodeOnly) { throw 'UNC-import kan endast användas med Hela arbetsflödet.' }
+        if ($AnalyzeOnly -or $EncodeOnly) { throw (T 'RuntimeUncImportFullWorkflowOnly' 'UNC import can only be used with Full workflow.') }
         $uncRecords=@(Import-UncMediaFiles -SourcePath $UncSourcePath)
 
         $sourceList = New-Object System.Collections.Generic.List[string]
@@ -2867,19 +2986,19 @@ if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID=
         $currentQueueSourcePaths=@($sourceList.ToArray())
         $currentQueueOutputPaths=@($outputList.ToArray())
 
-        # Scan-MediaLibrary har redan stöd för en absolut include-lista.
-        # I köläge använder vi en temporär lista så filer från andra köposter
-        # aldrig dras in i muxningen för den aktuella UNC-mappen.
+        # Scan-MediaLibrary already supports an absolute include list.
+        # In queue mode we use a temporary list so files from other queue items
+        # are never pulled into muxing for the current UNC folder.
         $queueIncludeListPath=Join-Path $Script:TempFolder ('queue-current-sources_{0}.json' -f $Script:RunId)
         Save-JsonFile -Path $queueIncludeListPath -Value @($currentQueueSourcePaths)
         $IncludeListPath=$queueIncludeListPath
-        Write-Status INFO ("Köisolering: aktuell UNC-kö innehåller {0} lokal(a) källfil(er) och {1} förväntad(e) MKV-resultat." -f @($currentQueueSourcePaths).Count,@($currentQueueOutputPaths).Count)
+        Write-Status INFO (T 'RuntimeQueueIsolationSources' 'Queue isolation: current UNC queue contains {0} local source file(s) and {1} expected MKV result(s).' @(@($currentQueueSourcePaths).Count,@($currentQueueOutputPaths).Count))
     }
     if (-not $AnalyzeOnly -and -not $EncodeOnly) {
         Write-Host ''
-        Write-Status INFO ('Söker rekursivt efter valda format: {0}...' -f (($Script:SelectedVideoFormats | ForEach-Object {$_.ToUpperInvariant()}) -join ', '))
+        Write-Status INFO (T 'RuntimeSearchingSelectedFormats' 'Searching recursively for selected formats: {0}...' @( (($Script:SelectedVideoFormats | ForEach-Object {$_.ToUpperInvariant()}) -join ', ') ))
         if ($ImportFromUnc -and @($currentQueueSourcePaths).Count -eq 0) {
-            Write-Status INFO 'Aktuell UNC-kö har inga lokala källfiler att muxa. Fortsätter med befintliga MKV-resultat för just denna kö.'
+            Write-Status INFO (T 'RuntimeNoLocalSourcesForCurrentQueue' 'The current UNC queue has no local source files to mux. Continuing with existing MKV results for this queue.')
             $items=@()
         }
         else {
@@ -2892,19 +3011,19 @@ if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID=
         $pending=@($items | Where-Object { $_.NeedsProcessing }).Count
         if ($pending -gt 0) {
             $start=$NoConfirm
-            if (-not $NoConfirm) { $start=((Read-Host ("Starta muxning av {0} filer? (J/N)" -f $pending)) -match '^(j|ja|y|yes)$') }
+            if (-not $NoConfirm) { $start=((Read-Host (T 'RuntimeConfirmMux' 'Start muxing {0} file(s)? (Y/N)' @($pending))) -match '^(j|ja|y|yes)$') }
             if ($start) {
-                Write-Status INFO 'Muxningen startar. Video och ljud kopieras utan omkodning.'
+                Write-Status INFO (T 'RuntimeMuxStarting' 'Muxing starts. Video and audio are copied without re-encoding.')
                 $mux=@(Invoke-MuxQueue -Items $items)
                 Save-MuxResults -Results $mux
                 Show-MuxSummary -Results $mux
                 $items=@(Scan-MediaLibrary -AllowEmptyIncludeList)
                 Save-ScanResults -Items $items
-                if ($items.Count -eq 0) { Write-Status OK 'Källmappen är nu tom efter lyckad muxning och rensning.' }
+                if ($items.Count -eq 0) { Write-Status OK (T 'RuntimeSourceFolderEmpty' 'The source folder is now empty after successful muxing and cleanup.') }
             }
         }
     }
-    else { Write-Status INFO 'Källskanning och muxning hoppas över.' }
+    else { Write-Status INFO (T 'RuntimeSourceScanMuxSkipped' 'Source scanning and muxing are skipped.') }
 
     $analysis = if ($ImportFromUnc) { @(Analyze-MkvLibrary -OnlyPaths @($currentQueueOutputPaths)) } else { @(Analyze-MkvLibrary) }
     Save-AnalysisReports -Results $analysis
@@ -2914,15 +3033,15 @@ if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID=
     }
     $encodeCount=@($analysis | Where-Object { $_.Recommended -and $_.TargetSizeMB -gt 0 }).Count
     if ($DisableEncoding) {
-        Write-Status INFO 'MKV-omkodning är avstängd. Ingen rekommenderad fil kommer att omkodas.'
+        Write-Status INFO (T 'RuntimeEncodingDisabled' 'MKV encoding is disabled. No recommended file will be encoded.')
     }
     elseif ($encodeCount -gt 0) {
         $startEncode=$EncodeRecommended
-        if (-not $EncodeRecommended) { $startEncode=((Read-Host ("Starta HEVC-omkodning med vald encoder av {0} rekommenderade filer? (J/N)" -f $encodeCount)) -match '^(j|ja|y|yes)$') }
+        if (-not $EncodeRecommended) { $startEncode=((Read-Host (T 'RuntimeConfirmEncode' 'Start HEVC encoding with the selected encoder for {0} recommended file(s)? (Y/N)' @($encodeCount))) -match '^(j|ja|y|yes)$') }
         if ($startEncode) {
             $enc=@(Invoke-RecommendedEncoding -AnalysisResults $analysis)
             if (@($enc | Where-Object { $_.Success -and $_.Replaced }).Count -gt 0) {
-                Write-Status INFO 'Analyserar om de färdiga HEVC-filerna...'
+                Write-Status INFO (T 'RuntimeReanalyzingHevc' 'Reanalyzing completed HEVC files...')
                 $analysis = if ($ImportFromUnc) { @(Analyze-MkvLibrary -OnlyPaths @($currentQueueOutputPaths)) } else { @(Analyze-MkvLibrary) }
                 Save-AnalysisReports -Results $analysis
                 Show-AnalysisSummary -Results $analysis
@@ -2942,15 +3061,15 @@ if($Script:VerboseLogging){Write-VerboseDiagnostic ('Verbose logging aktiv. PID=
             }
         }
         Write-Host ''
-        Write-Status INFO ("Återför endast de {0} MKV-filer som hör till den aktuella UNC-importen." -f @($uncRecords | Where-Object { $_.ImportSuccess }).Count)
+        Write-Status INFO (T 'RuntimeReturningCurrentUncImportOnly' 'Returning only the {0} MKV file(s) belonging to the current UNC import.' @(@($uncRecords | Where-Object { $_.ImportSuccess }).Count))
         [void](Publish-UncResultsAndCleanup -Records $uncRecords -DeleteOriginals ([bool]$DeleteUncAfterSuccess))
     }
     Remove-EmptyLocalQueueFolders -Records $uncRecords
     if (-not [string]::IsNullOrWhiteSpace($queueIncludeListPath)) { Remove-Item -LiteralPath $queueIncludeListPath -Force -ErrorAction SilentlyContinue }
     $duration=(Get-Date)-$Script:StartTime
-    Write-Status OK ("Körningen är klar. Tid: {0}" -f $duration.ToString('hh\:mm\:ss'))
-    Write-Status INFO ("Loggfil: {0}" -f $Script:LogFile)
+    Write-Status OK (T 'RuntimeRunCompleted' 'Run completed. Time: {0}' @($duration.ToString('hh\:mm\:ss')))
+    Write-Status INFO (T 'RuntimeLogFile' 'Log file: {0}' @($Script:LogFile))
 }
-catch { Write-Host ''; Write-Status ERROR $_.Exception.Message; Write-Status ERROR ("Rad: {0}" -f $_.InvocationInfo.ScriptLineNumber); exit 1 }
-finally { if (-not $NoPause -and $Host.Name -eq 'ConsoleHost') { Write-Host ''; Write-Host 'Tryck Enter för att avsluta...' -ForegroundColor DarkGray; [void](Read-Host) } }
+catch { Write-Host ''; Write-Status ERROR $_.Exception.Message; Write-Status ERROR (T 'RuntimeLineNumber' 'Line: {0}' @($_.InvocationInfo.ScriptLineNumber)); exit 1 }
+finally { if (-not $NoPause -and $Host.Name -eq 'ConsoleHost') { Write-Host ''; Write-Host (T 'RuntimePressEnterToExit' 'Press Enter to exit...') -ForegroundColor DarkGray; [void](Read-Host) } }
 #endregion

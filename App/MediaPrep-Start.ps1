@@ -3,6 +3,129 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 
+
+# 0.11.53 startup diagnostics. This log is deliberately created before WinForms
+# initialization so an early startup failure cannot disappear without a trace.
+$script:StartupWatch=[Diagnostics.Stopwatch]::StartNew()
+$script:StartScriptPath=$MyInvocation.MyCommand.Path
+$script:AppFolder=Split-Path -Parent $script:StartScriptPath
+$script:Root=Split-Path -Parent $script:AppFolder
+$script:StartupTracePath=$null
+$script:StartupVerboseTracePath=$null
+$script:StartupVerbose=$false
+$script:StartupTimingActive=$true
+$script:StartupStageStarts=@{}
+$script:SplashSignalPath=$null
+$script:SplashProcess=$null
+$script:SplashStopTimer=$null
+
+function Initialize-StartupTrace {
+    try{
+        $folder=Join-Path $script:Root 'Loggar'
+        if(-not(Test-Path -LiteralPath $folder -PathType Container)){New-Item -ItemType Directory -Path $folder -Force|Out-Null}
+        $script:StartupTracePath=Join-Path $folder 'MediaPrep-Startup.log'
+        $header="MediaPrep MKV Toolkit 0.11.53 startup trace`r`nStarted: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'))`r`n"
+        [IO.File]::WriteAllText($script:StartupTracePath,$header,(New-Object Text.UTF8Encoding($false)))
+    }catch{$script:StartupTracePath=$null}
+}
+function Write-StartupTrace {
+    param([string]$Stage,[string]$Details='')
+    try{
+        if([string]::IsNullOrWhiteSpace([string]$script:StartupTracePath)){return}
+        $now=Get-Date
+        $ms=[int][Math]::Round($script:StartupWatch.Elapsed.TotalMilliseconds)
+        $line=('{0}  +{1,7} ms  {2}' -f $now.ToString('yyyy-MM-dd HH:mm:ss.fff'),$ms,$Stage)
+        if(-not[string]::IsNullOrWhiteSpace($Details)){$line+='  '+$Details}
+        $encoding=New-Object Text.UTF8Encoding($false)
+        [IO.File]::AppendAllText($script:StartupTracePath,$line+[Environment]::NewLine,$encoding)
+        if($script:StartupVerbose -and -not[string]::IsNullOrWhiteSpace([string]$script:StartupVerboseTracePath)){
+            [IO.File]::AppendAllText($script:StartupVerboseTracePath,$line+[Environment]::NewLine,$encoding)
+        }
+    }catch{}
+}
+function Write-VerboseStartupTrace {
+    param([string]$Stage,[string]$Details='')
+    try{
+        if(-not$script:StartupVerbose -or [string]::IsNullOrWhiteSpace([string]$script:StartupVerboseTracePath)){return}
+        $now=Get-Date
+        $ms=[int][Math]::Round($script:StartupWatch.Elapsed.TotalMilliseconds)
+        $line=('{0}  +{1,7} ms  {2}' -f $now.ToString('yyyy-MM-dd HH:mm:ss.fff'),$ms,$Stage)
+        if(-not[string]::IsNullOrWhiteSpace($Details)){$line+='  '+$Details}
+        [IO.File]::AppendAllText($script:StartupVerboseTracePath,$line+[Environment]::NewLine,(New-Object Text.UTF8Encoding($false)))
+    }catch{}
+}
+function Enable-VerboseStartupTrace {
+    try{
+        if($script:StartupVerbose){return}
+        $folder=Join-Path $script:Root 'Loggar'
+        if(-not(Test-Path -LiteralPath $folder -PathType Container)){New-Item -ItemType Directory -Path $folder -Force|Out-Null}
+        $script:StartupVerboseTracePath=Join-Path $folder ('MediaPrep-Startup_{0}.log' -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        if(Test-Path -LiteralPath $script:StartupTracePath -PathType Leaf){
+            [IO.File]::Copy($script:StartupTracePath,$script:StartupVerboseTracePath,$true)
+        }
+        $script:StartupVerbose=$true
+        Write-StartupTrace 'VerboseStartupTimingEnabled' ('Log='+$script:StartupVerboseTracePath)
+    }catch{
+        $script:StartupVerbose=$false
+        $script:StartupVerboseTracePath=$null
+    }
+}
+function Start-StartupTiming {
+    param([Parameter(Mandatory=$true)][string]$Stage)
+    if(-not$script:StartupVerbose -or -not$script:StartupTimingActive){return}
+    try{
+        $script:StartupStageStarts[$Stage]=[double]$script:StartupWatch.Elapsed.TotalMilliseconds
+        Write-VerboseStartupTrace ($Stage+'-Start')
+    }catch{}
+}
+function Stop-StartupTiming {
+    param([Parameter(Mandatory=$true)][string]$Stage,[string]$Details='')
+    if(-not$script:StartupVerbose -or -not$script:StartupTimingActive){return}
+    try{
+        $durationText=''
+        if($script:StartupStageStarts.ContainsKey($Stage)){
+            $duration=[int][Math]::Round(([double]$script:StartupWatch.Elapsed.TotalMilliseconds)-[double]$script:StartupStageStarts[$Stage])
+            $script:StartupStageStarts.Remove($Stage)
+            $durationText=('Duration={0} ms' -f $duration)
+        }
+        if(-not[string]::IsNullOrWhiteSpace($Details)){
+            if(-not[string]::IsNullOrWhiteSpace($durationText)){$durationText+='  '}
+            $durationText+=$Details
+        }
+        Write-VerboseStartupTrace ($Stage+'-End') $durationText
+    }catch{}
+}
+function Start-MediaPrepSplash {
+    try{
+        $splashScript=Join-Path $script:AppFolder 'MediaPrep-Splash.ps1'
+        $splashImage=Join-Path (Join-Path $script:Root 'Assets') 'Media-PrepMKV-Toolkit-Splash.png'
+        if(-not(Test-Path -LiteralPath $splashScript -PathType Leaf) -or -not(Test-Path -LiteralPath $splashImage -PathType Leaf)){return}
+        $script:SplashSignalPath=Join-Path $env:TEMP ('MediaPrep-Splash-'+[guid]::NewGuid().ToString('N')+'.stop')
+        Remove-Item -LiteralPath $script:SplashSignalPath -Force -ErrorAction SilentlyContinue
+        $psi=New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName='powershell.exe'
+        $psi.Arguments='-NoProfile -ExecutionPolicy Bypass -STA -File "'+$splashScript+'" -Root "'+$script:Root+'" -SignalPath "'+$script:SplashSignalPath+'" -ParentPid '+[string]$PID
+        $psi.WorkingDirectory=$script:Root
+        $psi.UseShellExecute=$false
+        $psi.CreateNoWindow=$true
+        $script:SplashProcess=[Diagnostics.Process]::Start($psi)
+        Write-StartupTrace 'SplashProcessStarted' ('PID='+[string]$script:SplashProcess.Id)
+    }catch{
+        Write-StartupTrace 'SplashProcessFailed' $_.Exception.Message
+        $script:SplashSignalPath=$null;$script:SplashProcess=$null
+    }
+}
+function Stop-MediaPrepSplash {
+    try{
+        if(-not[string]::IsNullOrWhiteSpace([string]$script:SplashSignalPath)){
+            [IO.File]::WriteAllText($script:SplashSignalPath,'close',(New-Object Text.UTF8Encoding($false)))
+        }
+    }catch{}
+}
+
+Initialize-StartupTrace
+Write-StartupTrace 'ScriptStarted'
+
 # MediaPrep's graphical interface requires FullLanguage. On systems where
 # AppLocker/WDAC enforces ConstrainedLanguage, stop before loading WinForms so
 # the user gets a clear explanation instead of a cascade of type/method errors.
@@ -30,9 +153,13 @@ MediaPrep will now close.
     exit 10
 }
 
+Start-MediaPrepSplash
+Write-StartupTrace 'BeforeWinForms'
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
+Write-StartupTrace 'WinFormsReady'
 
 # WinForms processes do not need their PowerShell console windows visible.
 # The queue worker has its own optional detail console that can be toggled from the queue monitor.
@@ -174,7 +301,7 @@ function Test-UncQueueAccess {
     foreach($rawPath in @($Paths)){
         $path=[string]$rawPath
         if([string]::IsNullOrWhiteSpace($path) -or -not $path.StartsWith('\\')){
-            throw(T 'InvalidUnc' 'Invalid UNC path: {0}' @($path))
+            throw(T 'InvalidUnc' 'Invalid or unavailable UNC path: {0}' @($path))
         }
         $serverRoot=Get-UncServerRoot $path
         $hasAccess=$false
@@ -212,6 +339,8 @@ function Test-UncQueueAccess {
 $script:AppFolder = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:BootstrapRoot = Split-Path -Parent $script:AppFolder
 trap {
+    Write-StartupTrace 'StartupTrap' $_.Exception.Message
+    Stop-MediaPrepSplash
     try {
         $fallbackLogFolder = Join-Path $script:BootstrapRoot 'Loggar'
         if (-not (Test-Path -LiteralPath $fallbackLogFolder -PathType Container)) {
@@ -324,6 +453,8 @@ function Invoke-LegacyLayoutMigration {
 Invoke-LegacyLayoutMigration
 
 $script:QueueProcess = $null
+$script:QueueDashboardProcess = $null
+$script:SuppressDashboardShutdownOnClose = $false
 $script:QueueRunActive = $false
 $script:UncItems = @()
 $script:LocalItems = @()
@@ -458,11 +589,11 @@ function Pause-StatisticsRun {
     Save-StatisticsSession $session
 }
 function New-RecoveryChoiceDialog {
-    $d=New-Object Windows.Forms.Form;$d.Text='MediaPrep - ofärdig session';$d.StartPosition='CenterScreen';$d.FormBorderStyle='FixedDialog';$d.MaximizeBox=$false;$d.MinimizeBox=$false;$d.ClientSize=New-Object Drawing.Size(560,205)
-    $l=New-Object Windows.Forms.Label;$l.Location=New-Object Drawing.Point(18,18);$l.Size=New-Object Drawing.Size(524,78);$l.Text="MediaPrep hittade en sessionsfil som inte avslutades normalt.`r`n`r`nVill du fortsätta sessionen, spara den och kön till senare, eller ta bort sessions-/köinformationen? Lokala videofiler och UNC-original påverkas inte.";$d.Controls.Add($l)
-    $continue=New-Object Windows.Forms.Button;$continue.Text='Fortsätt';$continue.Location=New-Object Drawing.Point(78,132);$continue.Size=New-Object Drawing.Size(120,38);$continue.Tag='Continue';$d.Controls.Add($continue)
-    $save=New-Object Windows.Forms.Button;$save.Text='Spara till senare';$save.Location=New-Object Drawing.Point(210,132);$save.Size=New-Object Drawing.Size(140,38);$save.Tag='Save';$d.Controls.Add($save)
-    $delete=New-Object Windows.Forms.Button;$delete.Text='Ta bort';$delete.Location=New-Object Drawing.Point(362,132);$delete.Size=New-Object Drawing.Size(120,38);$delete.Tag='Delete';$d.Controls.Add($delete)
+    $d=New-Object Windows.Forms.Form;$d.Text=T 'RecoverySessionTitle' 'MediaPrep - unfinished session';$d.StartPosition='CenterScreen';$d.FormBorderStyle='FixedDialog';$d.MaximizeBox=$false;$d.MinimizeBox=$false;$d.ClientSize=New-Object Drawing.Size(560,205)
+    $l=New-Object Windows.Forms.Label;$l.Location=New-Object Drawing.Point(18,18);$l.Size=New-Object Drawing.Size(524,78);$l.Text=T 'RecoverySessionMessage' 'MediaPrep found a session file that did not close normally.';$d.Controls.Add($l)
+    $continue=New-Object Windows.Forms.Button;$continue.Text=T 'RecoveryContinue' 'Continue';$continue.Location=New-Object Drawing.Point(78,132);$continue.Size=New-Object Drawing.Size(120,38);$continue.Tag='Continue';$d.Controls.Add($continue)
+    $save=New-Object Windows.Forms.Button;$save.Text=T 'RecoverySaveLater' 'Save for later';$save.Location=New-Object Drawing.Point(210,132);$save.Size=New-Object Drawing.Size(140,38);$save.Tag='Save';$d.Controls.Add($save)
+    $delete=New-Object Windows.Forms.Button;$delete.Text=T 'RecoveryDelete' 'Delete';$delete.Location=New-Object Drawing.Point(362,132);$delete.Size=New-Object Drawing.Size(120,38);$delete.Tag='Delete';$d.Controls.Add($delete)
     $script:RecoveryChoice='Continue'
     $continue.Add_Click({$script:RecoveryChoice='Continue';$d.Close()})
     $save.Add_Click({$script:RecoveryChoice='Save';$d.Close()})
@@ -492,7 +623,7 @@ function Initialize-StatisticsState {
     if($null -eq $old){Remove-Item -LiteralPath $script:StatisticsCurrentPath -Force -ErrorAction SilentlyContinue;return}
     $status=[string](P $old 'Status' '')
     if($status -eq 'Closed'){[void](Save-SessionArchive $old);Remove-Item -LiteralPath $script:StatisticsCurrentPath -Force -ErrorAction SilentlyContinue;return}
-    # Stoppa klockan vid senast kända uppdatering, så tiden medan programmet varit nere inte räknas.
+    # Stop the clock at the last known update so downtime is not counted.
     if($status -eq 'Running'){
         [double]$active=[double](P $old 'ActiveSeconds' (P $old 'ElapsedSeconds' 0));$a=[string](P $old 'ActiveRunStartedUtc' '');$last=[string](P $old 'LastUpdatedUtc' '')
         if(-not[string]::IsNullOrWhiteSpace($a) -and -not[string]::IsNullOrWhiteSpace($last)){try{$active += ([datetime]::Parse($last).ToUniversalTime()-[datetime]::Parse($a).ToUniversalTime()).TotalSeconds}catch{}}
@@ -552,7 +683,7 @@ function P {
 }
 function Default-Prefs {
     return [pscustomobject][ordered]@{
-        Version = '0.11.52'
+        Version = '0.11.53'
         Language = 'system'
         ApplicationFolder = $script:Root
         SourceFolder = (Join-Path $script:Root 'UnProcessed')
@@ -574,6 +705,8 @@ function Default-Prefs {
         CustomThemeBackground = '#F4F7FA'
         SelectedEncoderId = 'cpu-libx265'
         EncoderBenchmarkSeconds = 12
+        # Hardware is populated after the first real hardware read and is reused on normal startup.
+        Hardware = $null
     }
 }
 function Default-Settings {
@@ -626,9 +759,8 @@ function Ensure-WorkingFolder {
 }
 
 # Preferences are optional. Missing, partial or invalid values fall back to the script folder.
-Initialize-StatisticsState
 $script:Prefs = Merge-Defaults -Loaded (Read-Json -Path $script:PreferencesPath -Default $null) -Defaults (Default-Prefs)
-$script:Prefs.Version = '0.11.52'
+$script:Prefs.Version = '0.11.53'
 $script:Prefs.ApplicationFolder = Resolve-ConfiguredPath -Value $script:Prefs.ApplicationFolder -FallbackRelative '.'
 if (-not (Test-Path -LiteralPath $script:Prefs.ApplicationFolder -PathType Container)) {
     $script:Prefs.ApplicationFolder = $script:Root
@@ -660,6 +792,125 @@ $script:Prefs.SelectedEncoderId = [string](P $script:Prefs 'SelectedEncoderId' '
 $script:Prefs.EncoderBenchmarkSeconds = [int](P $script:Prefs 'EncoderBenchmarkSeconds' 12)
 if($script:Prefs.EncoderBenchmarkSeconds -lt 5 -or $script:Prefs.EncoderBenchmarkSeconds -gt 30){$script:Prefs.EncoderBenchmarkSeconds=12}
 
+# Resolve the interface language before unfinished-session recovery so recovery dialogs use the same language.
+# Language resources use BCP-47 culture names (for example en-US and sv-SE).
+# en-US is the authoritative fallback. A same-schema older translation may still
+# be used safely: missing keys and format errors fall back to en-US.
+$script:LanguageSchemaVersion = 1
+$script:RequiredLanguageFileVersion = '1.6.0'
+$script:FallbackLanguageCulture = 'en-US'
+$script:LanguageBase = [pscustomobject]@{}
+$script:L = [pscustomobject]@{}
+$script:LanguageDocument = $null
+$script:LanguageFileIsCurrent = $false
+
+function Normalize-LanguagePreference {
+    param([string]$Code)
+    if ([string]::IsNullOrWhiteSpace($Code)) { return 'system' }
+    $value = $Code.Trim()
+    switch ($value.ToLowerInvariant()) {
+        'system'  { return 'system' }
+        'default' { return 'system' }
+        'en'      { return 'en-US' }
+        'english' { return 'en-US' }
+        'en-us'   { return 'en-US' }
+        'sv'      { return 'sv-SE' }
+        'swedish' { return 'sv-SE' }
+        'svenska' { return 'sv-SE' }
+        'sv-se'   { return 'sv-SE' }
+    }
+    try { return ([Globalization.CultureInfo]::GetCultureInfo($value)).Name } catch { return $value }
+}
+function Read-LanguageDocument {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $doc = Read-Json -Path $Path -Default $null
+    if ($null -eq $doc) { return $null }
+    try { $schema = [int](P $doc 'SchemaVersion' -1) } catch { return $null }
+    if ($schema -ne $script:LanguageSchemaVersion) { return $null }
+    $culture = [string](P $doc 'Culture' '')
+    $version = [string](P $doc 'LanguageFileVersion' '')
+    if ([string]::IsNullOrWhiteSpace($culture) -or [string]::IsNullOrWhiteSpace($version)) { return $null }
+    return $doc
+}
+function Get-InstalledLanguageDocuments {
+    $result = New-Object System.Collections.Generic.List[object]
+    $folder = Join-Path $script:Root 'Languages'
+    foreach ($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)) {
+        $doc = Read-LanguageDocument $file.FullName
+        if ($null -eq $doc) { continue }
+        $culture = [string](P $doc 'Culture' '')
+        if ([string]::IsNullOrWhiteSpace($culture)) { continue }
+        $result.Add([pscustomobject]@{Path=$file.FullName;Culture=$culture;Document=$doc})
+    }
+    return @($result.ToArray())
+}
+function Get-SystemLanguageCode {
+    $installed = @(Get-InstalledLanguageDocuments)
+    $uiCulture = [Globalization.CultureInfo]::CurrentUICulture
+    foreach ($entry in $installed) {
+        if ([string]$entry.Culture -ieq $uiCulture.Name) { return [string]$entry.Culture }
+    }
+    # If an exact regional culture is not installed, use the installed variant
+    # for the same language (for example en-GB -> en-US).
+    foreach ($entry in $installed) {
+        try {
+            $entryCulture = [Globalization.CultureInfo]::GetCultureInfo([string]$entry.Culture)
+            if ($entryCulture.TwoLetterISOLanguageName -ieq $uiCulture.TwoLetterISOLanguageName) { return [string]$entry.Culture }
+        } catch { }
+    }
+    return $script:FallbackLanguageCulture
+}
+function Get-LanguagePath {
+    param([string]$Culture)
+    return (Join-Path (Join-Path $script:Root 'Languages') ("mediaprep.{0}.json" -f $Culture))
+}
+function Load-Language {
+    param([string]$Code)
+    $basePath = Get-LanguagePath $script:FallbackLanguageCulture
+    $baseDoc = Read-LanguageDocument $basePath
+    if ($null -eq $baseDoc) { $baseDoc = [pscustomobject]@{} }
+    $script:LanguageBase = $baseDoc
+
+    $requestedCode = Normalize-LanguagePreference $Code
+    $resolvedCode = if ($requestedCode -eq 'system') { Get-SystemLanguageCode } else { $requestedCode }
+    $selectedDoc = Read-LanguageDocument (Get-LanguagePath $resolvedCode)
+    if ($null -eq $selectedDoc) {
+        $resolvedCode = $script:FallbackLanguageCulture
+        $selectedDoc = $baseDoc
+    }
+    if ($null -eq $selectedDoc) { $selectedDoc = [pscustomobject]@{} }
+    $script:ResolvedLanguageCode = $resolvedCode
+    $script:LanguageSource = if ($requestedCode -eq 'system') { 'WindowsUICulture' } else { 'Preference' }
+    $script:LanguageDocument = $selectedDoc
+    $script:L = $selectedDoc
+    $script:LanguageFileIsCurrent = ([string](P $selectedDoc 'LanguageFileVersion' '') -eq $script:RequiredLanguageFileVersion)
+}
+function T {
+    param(
+        [string]$Key,
+        [string]$Fallback,
+        [object[]]$FormatArgs = @()
+    )
+    $baseProperty = if ($script:LanguageBase) { $script:LanguageBase.PSObject.Properties[$Key] } else { $null }
+    $baseText = if ($baseProperty -and -not [string]::IsNullOrWhiteSpace([string]$baseProperty.Value)) { [string]$baseProperty.Value } else { $Fallback }
+    $property = if ($script:L) { $script:L.PSObject.Properties[$Key] } else { $null }
+    $text = if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) { [string]$property.Value } else { $baseText }
+    $safeFormatArgs = @($FormatArgs)
+    if ($safeFormatArgs.Count -gt 0) {
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture, $text, $safeFormatArgs) } catch { }
+        if ($text -ne $baseText) {
+            try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture, $baseText, $safeFormatArgs) } catch { }
+        }
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture, $Fallback, $safeFormatArgs) } catch { return $Fallback }
+    }
+    return $text
+}
+$script:Prefs.Language = Normalize-LanguagePreference ([string]$script:Prefs.Language)
+Load-Language ([string]$script:Prefs.Language)
+# Recovery UI must use the resolved language too, so initialize unfinished-session state only after T is available.
+Initialize-StatisticsState
+
 $script:ConfigPath = Join-Path (Join-Path $script:Root 'Data') 'config.json'
 $script:QueueHost = Join-Path $script:AppFolder 'MediaPrep-Queue-Host.ps1'
 $script:QueueDashboard = Join-Path $script:AppFolder 'MediaPrep-Queue-Dashboard.ps1'
@@ -672,48 +923,9 @@ $script:MediaPrepUpdateResultPath = Join-Path $script:Prefs.DataFolder 'mediapre
 $script:JobPath = Join-Path $script:Prefs.DataFolder 'senaste-kojobb.json'
 $script:StopRequest = Join-Path $script:Prefs.DataFolder 'queue-stop.request'
 $script:Settings = Merge-Defaults -Loaded (Read-Json -Path $script:SettingsPath -Default $null) -Defaults (Default-Settings)
+if([bool](P $script:Settings 'VerboseLogging' $false)){Enable-VerboseStartupTrace}
+Write-StartupTrace 'PreferencesAndSettingsLoaded'
 
-function Get-SystemLanguageCode {
-    $languageFolder = Join-Path $script:Root 'Languages'
-    $uiCulture = [Globalization.CultureInfo]::CurrentUICulture
-    $fullCode = $uiCulture.Name.ToLowerInvariant()
-    $shortCode = $uiCulture.TwoLetterISOLanguageName.ToLowerInvariant()
-    foreach ($candidate in @($fullCode, $shortCode)) {
-        $candidatePath = Join-Path $languageFolder ("mediaprep.{0}.local" -f $candidate)
-        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { return $candidate }
-    }
-    return 'en'
-}
-function Load-Language {
-    param([string]$Code)
-    $languageFolder = Join-Path $script:Root 'Languages'
-    $requestedCode = if ([string]::IsNullOrWhiteSpace($Code)) { 'system' } else { $Code.ToLowerInvariant() }
-    $resolvedCode = if ($requestedCode -eq 'system') { Get-SystemLanguageCode } else { $requestedCode }
-    $path = Join-Path $languageFolder ("mediaprep.{0}.local" -f $resolvedCode)
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        $resolvedCode = 'en'
-        $path = Join-Path $languageFolder 'mediaprep.en.local'
-    }
-    $script:ResolvedLanguageCode = $resolvedCode
-    $script:LanguageSource = if ($requestedCode -eq 'system') { 'WindowsUICulture' } else { 'Preference' }
-    $script:L = Read-Json -Path $path -Default ([pscustomobject]@{})
-    if ($null -eq $script:L) { $script:L = [pscustomobject]@{} }
-}
-function T {
-    param(
-        [string]$Key,
-        [string]$Fallback,
-        [object[]]$FormatArgs = @()
-    )
-    $property = $script:L.PSObject.Properties[$Key]
-    $text = if ($property) { [string]$property.Value } else { $Fallback }
-    $safeFormatArgs = @($FormatArgs)
-    if ($safeFormatArgs.Count -gt 0) {
-        return [string]::Format([Globalization.CultureInfo]::CurrentCulture, $text, $safeFormatArgs)
-    }
-    return $text
-}
-Load-Language ([string]$script:Prefs.Language)
 
 function Show-MediaPrepUpdateResult {
     if(-not(Test-Path -LiteralPath $script:MediaPrepUpdateResultPath -PathType Leaf)){return}
@@ -802,25 +1014,71 @@ function Get-MediaPrepProcessRows {
         return @([pscustomobject]@{Name='powershell.exe';PID=[int]$PID})
     }
 }
+function Test-MediaPrepProcessingActive {
+    # Update safety gate: do not replace program files while a queue/media worker is active.
+    if($script:QueueRunActive){return $true}
+    try{if($script:QueueProcess -and -not $script:QueueProcess.HasExited){return $true}}catch{return $true}
+
+    # The queue host publishes its PID while it owns the optional detail console.
+    try{
+        $consoleStatePath=Join-Path $script:Prefs.DataFolder 'queue-console-window.json'
+        if(Test-Path -LiteralPath $consoleStatePath -PathType Leaf){
+            $consoleState=Read-Json -Path $consoleStatePath -Default $null
+            if($null-ne$consoleState){
+                $queuePid=[int](P $consoleState 'PID' 0)
+                if($queuePid-gt0 -and $null-ne(Get-Process -Id $queuePid -ErrorAction SilentlyContinue)){return $true}
+            }
+        }
+    }catch{}
+
+    # Also detect workers that survived a previous Start Center instance, including
+    # elevated Queue.ps1/MediaPrep.ps1 processes and MediaPrep-owned media tools.
+    try{
+        $rootText=[string]$script:Root
+        $all=@(Get-CimInstance Win32_Process -OperationTimeoutSec 3 -ErrorAction Stop | Select-Object ProcessId,Name,ExecutablePath,CommandLine)
+        foreach($proc in $all){
+            if([int]$proc.ProcessId -eq [int]$PID){continue}
+            $name=[string]$proc.Name
+            $cmd=[string]$proc.CommandLine
+            $exe=[string]$proc.ExecutablePath
+            $belongs=($cmd.IndexOf($rootText,[StringComparison]::OrdinalIgnoreCase)-ge0 -or $exe.IndexOf($rootText,[StringComparison]::OrdinalIgnoreCase)-ge0)
+            if(-not$belongs){continue}
+            if($name -match '^(powershell|pwsh)\.exe$' -and $cmd -match 'MediaPrep-(Queue-Host|Queue)\.ps1|[\\/]MediaPrep\.ps1'){return $true}
+            if($name -match '^(ffmpeg|ffprobe|mkvmerge)\.exe$'){return $true}
+        }
+    }catch{
+        # If process inspection is unavailable, fall back to the queue run marker.
+        try{
+            $runState=Read-Json -Path (Join-Path $script:Prefs.DataFolder 'queue-run-current.json') -Default $null
+            if($null-ne$runState -and [string](P $runState 'Status' '') -eq 'Running'){return $true}
+        }catch{}
+    }
+    return $false
+}
+
 $script:LastProcessBannerRefresh=[datetime]::MinValue
 $script:BannerToolVersionsInitialized=$false
 function Refresh-BannerRuntimeInfo {
     param([switch]$RefreshTools)
     if($null-ne$toolVersionLabel -and ($RefreshTools -or -not$script:BannerToolVersionsInitialized)){
-        $ff=Get-ExecutableVersionShort -Exe ([string]$script:Prefs.FFmpegPath) -Tool FFmpeg
-        $mk=Get-ExecutableVersionShort -Exe ([string]$script:Prefs.MkvmergePath) -Tool MKVToolNix
-        $toolVersionLabel.Text=(T 'BannerToolVersions' 'FFmpeg {0}  |  MKVToolNix {1}' @($ff,$mk))
-        $script:BannerToolVersionsInitialized=$true
+        Start-StartupTiming 'BannerToolVersions'
+        try{
+            $ff=Get-ExecutableVersionShort -Exe ([string]$script:Prefs.FFmpegPath) -Tool FFmpeg
+            $mk=Get-ExecutableVersionShort -Exe ([string]$script:Prefs.MkvmergePath) -Tool MKVToolNix
+            $toolVersionLabel.Text=(T 'BannerToolVersions' 'FFmpeg {0}  |  MKVToolNix {1}' @($ff,$mk))
+            $script:BannerToolVersionsInitialized=$true
+        }finally{Stop-StartupTiming 'BannerToolVersions'}
     }
     if($null-ne$processLabel){
         if(((Get-Date)-$script:LastProcessBannerRefresh).TotalSeconds -lt 5){return}
         $script:LastProcessBannerRefresh=Get-Date
-        $rows=@(Get-MediaPrepProcessRows)
+        Start-StartupTiming 'BannerProcessScan'
+        try{$rows=@(Get-MediaPrepProcessRows)}finally{Stop-StartupTiming 'BannerProcessScan'}
         $parts=New-Object System.Collections.Generic.List[string]
         foreach($row in $rows){$parts.Add(('{0} [{1}]' -f $row.Name,$row.PID))}
         if($parts.Count -eq 0){$parts.Add('-')}
         $lines=New-Object System.Collections.Generic.List[string]
-        $lines.Add((T 'BannerProcessesHeader' 'Processer:'))
+        $lines.Add((T 'BannerProcessesHeader' 'Processes:'))
         for($i=0;$i-lt$parts.Count;$i+=2){
             $left=[string]$parts[$i]
             $right=if(($i+1)-lt$parts.Count){[string]$parts[$i+1]}else{''}
@@ -950,7 +1208,7 @@ function Get-ListItems {
 }
 function Apply-Prefs-ToConfig {
     $cfg=Read-Json $script:ConfigPath ([pscustomobject]@{})
-    $map=[ordered]@{Version='0.11.52';Language=[string]$script:Prefs.Language;SourceFolder=[string]$script:Prefs.SourceFolder;OutputFolder=[string]$script:Prefs.OutputFolder;DataFolder=[string]$script:Prefs.DataFolder;LogFolder=[string]$script:Prefs.LogFolder;ReportFolder=[string]$script:Prefs.ReportFolder;TempFolder=[string]$script:Prefs.TempFolder;FFmpegPath=[string]$script:Prefs.FFmpegPath;FFprobePath=[string]$script:Prefs.FFprobePath;MkvmergePath=[string]$script:Prefs.MkvmergePath;TVTargetMBPerMinute=[double]$script:Prefs.TVTargetMBPerMinute;MovieTargetMBPerMinute=[double]$script:Prefs.MovieTargetMBPerMinute;EncodeThresholdMultiplier=[double]$script:Prefs.EncodeThresholdMultiplier;MinimumSavingPercent=[double]$script:Prefs.MinimumSavingPercent;SelectedEncoderId=[string]$script:Prefs.SelectedEncoderId}
+    $map=[ordered]@{Version='0.11.53';Language=[string]$script:Prefs.Language;SourceFolder=[string]$script:Prefs.SourceFolder;OutputFolder=[string]$script:Prefs.OutputFolder;DataFolder=[string]$script:Prefs.DataFolder;LogFolder=[string]$script:Prefs.LogFolder;ReportFolder=[string]$script:Prefs.ReportFolder;TempFolder=[string]$script:Prefs.TempFolder;FFmpegPath=[string]$script:Prefs.FFmpegPath;FFprobePath=[string]$script:Prefs.FFprobePath;MkvmergePath=[string]$script:Prefs.MkvmergePath;TVTargetMBPerMinute=[double]$script:Prefs.TVTargetMBPerMinute;MovieTargetMBPerMinute=[double]$script:Prefs.MovieTargetMBPerMinute;EncodeThresholdMultiplier=[double]$script:Prefs.EncodeThresholdMultiplier;MinimumSavingPercent=[double]$script:Prefs.MinimumSavingPercent;SelectedEncoderId=[string]$script:Prefs.SelectedEncoderId}
     foreach($name in $map.Keys){$cfg|Add-Member -NotePropertyName $name -NotePropertyValue $map[$name] -Force}
     Write-Json $script:ConfigPath $cfg
 }
@@ -1021,29 +1279,156 @@ function Apply-ControlTheme {
 
 # CPU/GPU encoder verification. MediaPrep deliberately does not trust model names alone:
 # the installed FFmpeg build and the actual driver/hardware combination must pass a real encode test.
-function Get-CurrentEncoderSignature {
-    try{
-        $ffmpegVersion=''
-        if(Test-Path -LiteralPath ([string]$script:Prefs.FFmpegPath) -PathType Leaf){
-            $ffmpegVersion=[string](& ([string]$script:Prefs.FFmpegPath) -version 2>&1 | Select-Object -First 1)
+$script:HardwareCacheVersion=1
+$script:SessionHardwareSnapshot=$null
+$script:SessionEncoderSignature=$null
+$script:SessionFFmpegVersionLine=$null
+
+function Set-ObjectProperty {
+    param([object]$Object,[string]$Name,[object]$Value)
+    if($null-eq$Object){return}
+    $property=$Object.PSObject.Properties[$Name]
+    if($property){$property.Value=$Value}else{$Object|Add-Member -NotePropertyName $Name -NotePropertyValue $Value}
+}
+function Clear-EncoderSessionSignature {
+    $script:SessionEncoderSignature=$null
+    $script:SessionFFmpegVersionLine=$null
+}
+function Test-SavedHardwareSnapshot {
+    param([object]$Snapshot)
+    if($null-eq$Snapshot){return $false}
+    if([int](P $Snapshot 'CacheVersion' 0) -ne $script:HardwareCacheVersion){return $false}
+    $computer=[string](P $Snapshot 'ComputerName' '')
+    if([string]::IsNullOrWhiteSpace($computer)){return $false}
+    if(-not[string]::Equals($computer,[string]$env:COMPUTERNAME,[StringComparison]::OrdinalIgnoreCase)){return $false}
+    return ($null-ne(P $Snapshot 'CPU' $null))
+}
+function New-HardwareSnapshotFromSystem {
+    $cpu=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1 Name,Manufacturer,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed
+    $gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object Name,AdapterCompatibility,DriverVersion,PNPDeviceID,DeviceID,AdapterRAM | Sort-Object Name,PNPDeviceID)
+    $cpuData=if($cpu){
+        [pscustomobject][ordered]@{
+            Name=[string]$cpu.Name
+            Manufacturer=[string]$cpu.Manufacturer
+            NumberOfCores=[int](P $cpu 'NumberOfCores' 0)
+            NumberOfLogicalProcessors=[int](P $cpu 'NumberOfLogicalProcessors' 0)
+            MaxClockSpeed=[int](P $cpu 'MaxClockSpeed' 0)
         }
-        $cpu=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-        $cpuName=if($cpu){[string]$cpu.Name}else{'CPU unknown'}
-        $parts=New-Object System.Collections.Generic.List[string]
-        $gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Sort-Object Name,PNPDeviceID)
-        foreach($g in $gpus){$parts.Add(('{0}|{1}|{2}' -f [string]$g.Name,[string]$g.DriverVersion,[string]$g.PNPDeviceID))}
-        return ('FFMPEG={0};CPU={1};GPU={2}' -f $ffmpegVersion,$cpuName,($parts -join ';'))
-    }catch{return ''}
+    }else{
+        [pscustomobject][ordered]@{Name='CPU unknown';Manufacturer='';NumberOfCores=0;NumberOfLogicalProcessors=0;MaxClockSpeed=0}
+    }
+    $gpuData=@($gpus | ForEach-Object {
+        [pscustomobject][ordered]@{
+            Name=[string]$_.Name
+            Vendor=[string]$_.AdapterCompatibility
+            DriverVersion=[string]$_.DriverVersion
+            PNPDeviceID=[string]$_.PNPDeviceID
+            DeviceID=[string]$_.DeviceID
+            AdapterRAM=if($null-ne$_.AdapterRAM){[int64]$_.AdapterRAM}else{$null}
+        }
+    })
+    return [pscustomobject][ordered]@{
+        CacheVersion=$script:HardwareCacheVersion
+        ComputerName=[string]$env:COMPUTERNAME
+        LastCheckedLocal=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        LastCheckedUtc=(Get-Date).ToUniversalTime().ToString('o')
+        CPU=$cpuData
+        GPUs=$gpuData
+    }
+}
+function Save-HardwareSnapshotToPreferences {
+    param([object]$Snapshot)
+    if($null-eq$Snapshot){return}
+    Set-ObjectProperty -Object $script:Prefs -Name 'Hardware' -Value $Snapshot
+    Write-Json $script:PreferencesPath $script:Prefs
+}
+function Convert-EncoderDocumentHardwareToSnapshot {
+    param([object]$Document)
+    if($null-eq$Document){return $null}
+    $hardware=P $Document 'Hardware' $null
+    if($null-eq$hardware){return $null}
+    $cpu=P $hardware 'CPU' $null
+    $gpus=@(P $hardware 'GPUs' @())
+    return [pscustomobject][ordered]@{
+        CacheVersion=$script:HardwareCacheVersion
+        ComputerName=[string]$env:COMPUTERNAME
+        LastCheckedLocal=[string](P $Document 'CheckedLocal' (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+        LastCheckedUtc=[string](P $Document 'CheckedUtc' (Get-Date).ToUniversalTime().ToString('o'))
+        CPU=$cpu
+        GPUs=$gpus
+    }
+}
+function Set-SessionHardwareFromEncoderDocument {
+    param([object]$Document,[switch]$Persist)
+    $snapshot=Convert-EncoderDocumentHardwareToSnapshot $Document
+    if($null-eq$snapshot){return $false}
+    $script:SessionHardwareSnapshot=$snapshot
+    $script:SessionEncoderSignature=[string](P $Document 'Signature' '')
+    $script:SessionFFmpegVersionLine=[string](P $Document 'FFmpegVersion' '')
+    if($Persist){Save-HardwareSnapshotToPreferences $snapshot}
+    return $true
+}
+function Get-HardwareSnapshot {
+    param([switch]$ForceRefresh,[switch]$Persist)
+    if(-not$ForceRefresh -and $null-ne$script:SessionHardwareSnapshot){
+        Write-VerboseStartupTrace 'HardwareSnapshotSource' 'Session memory'
+        return $script:SessionHardwareSnapshot
+    }
+    if(-not$ForceRefresh){
+        $saved=P $script:Prefs 'Hardware' $null
+        if(Test-SavedHardwareSnapshot $saved){
+            $script:SessionHardwareSnapshot=$saved
+            Write-VerboseStartupTrace 'HardwareSnapshotSource' ('Preferences; LastChecked='+[string](P $saved 'LastCheckedLocal' ''))
+            return $saved
+        }
+    }
+    Write-VerboseStartupTrace 'HardwareSnapshotSource' $(if($ForceRefresh){'Windows CIM; forced refresh'}else{'Windows CIM; preferences missing or for another computer'})
+    $snapshot=New-HardwareSnapshotFromSystem
+    $script:SessionHardwareSnapshot=$snapshot
+    Clear-EncoderSessionSignature
+    # A missing/mismatched cache is repaired automatically. Explicit refreshes are persisted too.
+    if($Persist -or -not(Test-SavedHardwareSnapshot (P $script:Prefs 'Hardware' $null))){Save-HardwareSnapshotToPreferences $snapshot}
+    return $snapshot
+}
+function Get-FFmpegVersionLine {
+    param([switch]$ForceRefresh)
+    if(-not$ForceRefresh -and -not[string]::IsNullOrWhiteSpace([string]$script:SessionFFmpegVersionLine)){return [string]$script:SessionFFmpegVersionLine}
+    $line=''
+    try{
+        if(Test-Path -LiteralPath ([string]$script:Prefs.FFmpegPath) -PathType Leaf){$line=[string](& ([string]$script:Prefs.FFmpegPath) -version 2>&1 | Select-Object -First 1)}
+    }catch{$line=''}
+    $script:SessionFFmpegVersionLine=$line
+    return $line
+}
+function New-EncoderSignatureFromHardwareSnapshot {
+    param([string]$FFmpegVersion,[object]$Snapshot)
+    if($null-eq$Snapshot){return ''}
+    $cpu=P $Snapshot 'CPU' $null
+    $cpuName=if($cpu){[string](P $cpu 'Name' 'CPU unknown')}else{'CPU unknown'}
+    $parts=New-Object System.Collections.Generic.List[string]
+    foreach($gpu in @((P $Snapshot 'GPUs' @()) | Sort-Object Name,PNPDeviceID)){
+        $parts.Add(('{0}|{1}|{2}' -f [string](P $gpu 'Name' ''),[string](P $gpu 'DriverVersion' ''),[string](P $gpu 'PNPDeviceID' '')))
+    }
+    return ('FFMPEG={0};CPU={1};GPU={2}' -f $FFmpegVersion,$cpuName,($parts -join ';'))
+}
+function Get-CurrentEncoderSignature {
+    param([switch]$ForceRefresh)
+    if(-not$ForceRefresh -and -not[string]::IsNullOrWhiteSpace([string]$script:SessionEncoderSignature)){return [string]$script:SessionEncoderSignature}
+    $hardware=Get-HardwareSnapshot -ForceRefresh:$ForceRefresh -Persist:$ForceRefresh
+    $ffmpegVersion=Get-FFmpegVersionLine -ForceRefresh:$ForceRefresh
+    $signature=New-EncoderSignatureFromHardwareSnapshot -FFmpegVersion $ffmpegVersion -Snapshot $hardware
+    $script:SessionEncoderSignature=$signature
+    return $signature
 }
 function Get-EncoderCapabilitiesDocument {
     return (Read-Json -Path $script:EncoderCapabilitiesPath -Default $null)
 }
 function Test-EncoderCapabilitiesCurrent {
-    param([object]$Document)
+    param([object]$Document,[switch]$ForceRefresh)
     if($null-eq$Document){return $false}
     $saved=[string](P $Document 'Signature' '')
     if([string]::IsNullOrWhiteSpace($saved)){return $false}
-    $current=Get-CurrentEncoderSignature
+    $current=Get-CurrentEncoderSignature -ForceRefresh:$ForceRefresh
     return (-not[string]::IsNullOrWhiteSpace($current) -and [string]::Equals($saved,$current,[StringComparison]::Ordinal))
 }
 function Get-EncoderById {
@@ -1055,9 +1440,10 @@ function Get-EncoderById {
 function Get-EncoderDisplayText {
     param([object]$Encoder,[switch]$UnverifiedCpu)
     if($UnverifiedCpu){
-        $cpu=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-        $name=if($cpu){[string]$cpu.Name}else{'CPU'}
-        return ($name+' — HEVC CPU — '+(T 'EncoderNotChecked' 'Ej kontrollerad'))
+        $hardware=Get-HardwareSnapshot
+        $cpu=P $hardware 'CPU' $null
+        $name=if($cpu){[string](P $cpu 'Name' 'CPU')}else{'CPU'}
+        return ($name+' — HEVC CPU — '+(T 'EncoderNotChecked' 'Not checked'))
     }
     if($null-eq$Encoder){return ''}
     $suffix=switch([string]$Encoder.Backend){'NVENC'{'HEVC NVENC'};'QSV'{'HEVC QSV'};'AMF'{'HEVC AMF'};default{'HEVC CPU'}}
@@ -1074,43 +1460,43 @@ function Get-StableEncoderIdSuffix {
     }finally{$sha.Dispose()}
 }
 function Get-DetectedEncoderCandidates {
-    # This is only a discovery view. It intentionally does not claim that an encoder works.
-    # Actual availability is established exclusively by MediaPrep-Encoder-Test.ps1.
+    # Discovery uses the latest saved hardware snapshot during normal startup.
+    # A real Check CPU/GPU, Refresh hardware, or queue start refreshes the snapshot from Windows.
     $items=New-Object System.Collections.Generic.List[object]
-    $cpu=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-    $cpuName=if($cpu){[string]$cpu.Name}else{'CPU'}
+    $hardware=Get-HardwareSnapshot
+    $cpu=P $hardware 'CPU' $null
+    $cpuName=if($cpu){[string](P $cpu 'Name' 'CPU')}else{'CPU'}
     $items.Add([pscustomobject]@{
         Id='cpu-libx265';HardwareName=$cpuName;Backend='CPU';Encoder='libx265';
         DriverVersion='';Verified=$false;DetectedOnly=$true
     })
 
-    $gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Sort-Object Name,PNPDeviceID)
-
-    foreach($gpu in @($gpus | Where-Object { [string]$_.Name -match 'NVIDIA' })){
-        $suffix=Get-StableEncoderIdSuffix ([string]$gpu.PNPDeviceID+[string]$gpu.Name)
+    $gpus=@(P $hardware 'GPUs' @())
+    foreach($gpu in @($gpus | Where-Object { [string](P $_ 'Name' '') -match 'NVIDIA' })){
+        $suffix=Get-StableEncoderIdSuffix ([string](P $gpu 'PNPDeviceID' '')+[string](P $gpu 'Name' ''))
         $items.Add([pscustomobject]@{
-            Id=('nvidia-'+$suffix+'-hevc_nvenc');HardwareName=[string]$gpu.Name;Backend='NVENC';
-            Encoder='hevc_nvenc';DriverVersion=[string]$gpu.DriverVersion;Verified=$false;DetectedOnly=$true
+            Id=('nvidia-'+$suffix+'-hevc_nvenc');HardwareName=[string](P $gpu 'Name' '');Backend='NVENC';
+            Encoder='hevc_nvenc';DriverVersion=[string](P $gpu 'DriverVersion' '');Verified=$false;DetectedOnly=$true
         })
     }
 
-    $intelGpus=@($gpus | Where-Object { [string]$_.Name -match 'Intel' })
+    $intelGpus=@($gpus | Where-Object { [string](P $_ 'Name' '') -match 'Intel' })
     if($intelGpus.Count-gt0){
-        $preferredIntel=@($intelGpus | Sort-Object @{Expression={if([string]$_.Name -match 'Arc'){0}else{1}}},Name | Select-Object -First 1)[0]
-        $suffix=Get-StableEncoderIdSuffix ([string]$preferredIntel.PNPDeviceID+[string]$preferredIntel.Name)
+        $preferredIntel=@($intelGpus | Sort-Object @{Expression={if([string](P $_ 'Name' '') -match 'Arc'){0}else{1}}},@{Expression={[string](P $_ 'Name' '')}} | Select-Object -First 1)[0]
+        $suffix=Get-StableEncoderIdSuffix ([string](P $preferredIntel 'PNPDeviceID' '')+[string](P $preferredIntel 'Name' ''))
         $items.Add([pscustomobject]@{
-            Id=('intel-'+$suffix+'-hevc_qsv');HardwareName=[string]$preferredIntel.Name;Backend='QSV';
-            Encoder='hevc_qsv';DriverVersion=[string]$preferredIntel.DriverVersion;Verified=$false;DetectedOnly=$true
+            Id=('intel-'+$suffix+'-hevc_qsv');HardwareName=[string](P $preferredIntel 'Name' '');Backend='QSV';
+            Encoder='hevc_qsv';DriverVersion=[string](P $preferredIntel 'DriverVersion' '');Verified=$false;DetectedOnly=$true
         })
     }
 
-    $amdGpus=@($gpus | Where-Object { [string]$_.Name -match 'AMD|Radeon' })
+    $amdGpus=@($gpus | Where-Object { [string](P $_ 'Name' '') -match 'AMD|Radeon' })
     if($amdGpus.Count-gt0){
         $preferredAmd=@($amdGpus | Select-Object -First 1)[0]
-        $suffix=Get-StableEncoderIdSuffix ([string]$preferredAmd.PNPDeviceID+[string]$preferredAmd.Name)
+        $suffix=Get-StableEncoderIdSuffix ([string](P $preferredAmd 'PNPDeviceID' '')+[string](P $preferredAmd 'Name' ''))
         $items.Add([pscustomobject]@{
-            Id=('amd-'+$suffix+'-hevc_amf');HardwareName=[string]$preferredAmd.Name;Backend='AMF';
-            Encoder='hevc_amf';DriverVersion=[string]$preferredAmd.DriverVersion;Verified=$false;DetectedOnly=$true
+            Id=('amd-'+$suffix+'-hevc_amf');HardwareName=[string](P $preferredAmd 'Name' '');Backend='AMF';
+            Encoder='hevc_amf';DriverVersion=[string](P $preferredAmd 'DriverVersion' '');Verified=$false;DetectedOnly=$true
         })
     }
     return $items.ToArray()
@@ -1118,7 +1504,7 @@ function Get-DetectedEncoderCandidates {
 function Get-DetectedEncoderDisplayText {
     param([object]$Encoder)
     $suffix=switch([string]$Encoder.Backend){'NVENC'{'HEVC NVENC'};'QSV'{'HEVC QSV'};'AMF'{'HEVC AMF'};default{'HEVC CPU'}}
-    return ('{0} — {1} — {2}' -f [string]$Encoder.HardwareName,$suffix,(T 'EncoderNotChecked' 'Ej kontrollerad'))
+    return ('{0} — {1} — {2}' -f [string]$Encoder.HardwareName,$suffix,(T 'EncoderNotChecked' 'Not checked'))
 }
 function Get-SelectedEncoderObject {
     $doc=Get-EncoderCapabilitiesDocument
@@ -1129,7 +1515,7 @@ function Get-SelectedEncoderObject {
 }
 function Get-EncoderBannerText {
     $encoder=Get-SelectedEncoderObject
-    if($null-eq$encoder){return (T 'EncoderBannerUnchecked' 'CPU HEVC • kontroll krävs')}
+    if($null-eq$encoder){return (T 'EncoderBannerUnchecked' 'CPU HEVC • check required')}
     switch([string]$encoder.Backend){
         'NVENC' { return 'NVIDIA HEVC NVENC' }
         'QSV'   { return 'Intel HEVC QSV' }
@@ -1138,26 +1524,27 @@ function Get-EncoderBannerText {
     }
 }
 function Update-EncoderBanner {
-    if($null-ne$subtitle){$subtitle.Text=((T 'AppSubtitleBase' 'Kö • UNC-import • Muxning')+' • '+(Get-EncoderBannerText))}
+    if($null-ne$subtitle){$subtitle.Text=((T 'AppSubtitleBase' 'Queue • UNC import • Muxing')+' • '+(Get-EncoderBannerText))}
 }
 function Format-OptionalNumber {
     param([object]$Value,[string]$Format='0.0',[string]$Suffix='')
-    if($null-eq$Value){return (T 'NotAvailable' 'Ej tillgängligt')}
-    try{return (([double]$Value).ToString($Format,[Globalization.CultureInfo]::CurrentCulture)+$Suffix)}catch{return (T 'NotAvailable' 'Ej tillgängligt')}
+    if($null-eq$Value){return (T 'NotAvailable' 'Not available')}
+    try{return (([double]$Value).ToString($Format,[Globalization.CultureInfo]::CurrentCulture)+$Suffix)}catch{return (T 'NotAvailable' 'Not available')}
 }
 function Get-HardwareSummaryText {
     $lines=New-Object System.Collections.Generic.List[string]
-    $cpu=Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    $hardware=Get-HardwareSnapshot
+    $cpu=P $hardware 'CPU' $null
     if($cpu){
-        $lines.Add(('CPU: {0}' -f [string]$cpu.Name))
-        $lines.Add(('     {0} {1} / {2} {3}' -f [int]$cpu.NumberOfCores,(T 'PhysicalCores' 'kärnor'),[int]$cpu.NumberOfLogicalProcessors,(T 'LogicalProcessors' 'logiska processorer')))
+        $lines.Add(('CPU: {0}' -f [string](P $cpu 'Name' 'CPU')))
+        $lines.Add(('     {0} {1} / {2} {3}' -f [int](P $cpu 'NumberOfCores' 0),(T 'PhysicalCores' 'cores'),[int](P $cpu 'NumberOfLogicalProcessors' 0),(T 'LogicalProcessors' 'logical processors')))
     }
-    $gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Sort-Object Name)
-    if($gpus.Count-eq0){$lines.Add('GPU: '+(T 'NoneDetected' 'Ingen identifierad'))}
+    $gpus=@(P $hardware 'GPUs' @())
+    if($gpus.Count-eq0){$lines.Add('GPU: '+(T 'NoneDetected' 'None detected'))}
     foreach($g in $gpus){
         $ram=''
-        try{if($null-ne$g.AdapterRAM -and [int64]$g.AdapterRAM-gt0){$ram=' | '+(Format-QueueBytes ([int64]$g.AdapterRAM))}}catch{}
-        $lines.Add(('GPU: {0} | driver {1}{2}' -f [string]$g.Name,[string]$g.DriverVersion,$ram))
+        try{$adapterRam=P $g 'AdapterRAM' $null;if($null-ne$adapterRam -and [int64]$adapterRam-gt0){$ram=' | '+(Format-QueueBytes ([int64]$adapterRam))}}catch{}
+        $lines.Add(('GPU: {0} | driver {1}{2}' -f [string](P $g 'Name' ''),[string](P $g 'DriverVersion' ''),$ram))
     }
     return ($lines -join [Environment]::NewLine)
 }
@@ -1209,28 +1596,28 @@ function Show-EncoderFailureSummary {
 
 function Get-EncoderCapabilitySummaryText {
     param([object]$Encoder)
-    if($null-eq$Encoder){return (T 'EncoderRunCheckHelp' 'Kör kontrollen för att verifiera CPU/GPU och FFmpeg-funktioner.')}
+    if($null-eq$Encoder){return (T 'EncoderRunCheckHelp' 'Run the check to verify CPU/GPU, HEVC encoders, compatible features and benchmark results.')}
     $lines=New-Object System.Collections.Generic.List[string]
-    $lines.Add((T 'EncoderDetailsHardware' 'Hårdvara: {0}' @([string]$Encoder.HardwareName)))
+    $lines.Add((T 'EncoderDetailsHardware' 'Hardware: {0}' @([string]$Encoder.HardwareName)))
     $lines.Add((T 'EncoderDetailsBackend' 'Backend: {0} / {1}' @([string]$Encoder.Backend,[string]$Encoder.Encoder)))
-    if(-not [string]::IsNullOrWhiteSpace([string](P $Encoder 'DriverVersion' ''))){$lines.Add((T 'EncoderDetailsDriver' 'Drivrutin: {0}' @([string]$Encoder.DriverVersion)))}
+    if(-not [string]::IsNullOrWhiteSpace([string](P $Encoder 'DriverVersion' ''))){$lines.Add((T 'EncoderDetailsDriver' 'Driver: {0}' @([string]$Encoder.DriverVersion)))}
     $bench=P $Encoder 'Benchmark' $null
     if($bench){
         $lines.Add('')
-        $lines.Add((T 'EncoderBenchmarkHeader' 'Benchmark'))
-        $lines.Add((T 'EncoderSpeedLine' 'Hastighet: {0}x' @((Format-OptionalNumber (P $bench 'SpeedX' $null) '0.00' ''))))
-        $lines.Add((T 'EncoderOutputSizeLine' 'Teststorlek: {0} MB' @((Format-OptionalNumber (P $bench 'OutputMB' $null) '0.00' ''))))
+        $lines.Add((T 'EncoderBenchmarkHeader' 'Benchmark (same 1080p test for every encoder)'))
+        $lines.Add((T 'EncoderSpeedLine' 'Speed: {0}x' @((Format-OptionalNumber (P $bench 'SpeedX' $null) '0.00' ''))))
+        $lines.Add((T 'EncoderOutputSizeLine' 'Test size: {0} MB' @((Format-OptionalNumber (P $bench 'OutputMB' $null) '0.00' ''))))
         $ssim=P $bench 'SSIM' $null
         if($null-ne$ssim){$lines.Add((T 'EncoderSsimLine' 'SSIM: {0}' @((Format-OptionalNumber $ssim '0.00000' ''))))}
         if([string]$Encoder.Backend -eq 'NVENC'){
-            $lines.Add((T 'EncoderVramLine' 'VRAM max: {0} MB (ökning {1} MB)' @((Format-OptionalNumber (P $bench 'VramPeakMB' $null) '0' ''),(Format-OptionalNumber (P $bench 'VramDeltaMB' $null) '0' ''))))
-            $lines.Add((T 'EncoderUtilLine' 'Encoder/GPU max: {0}% / {1}% | Temperatur max: {2} °C' @((Format-OptionalNumber (P $bench 'EncoderUtilMax' $null) '0' ''),(Format-OptionalNumber (P $bench 'GpuUtilMax' $null) '0' ''),(Format-OptionalNumber (P $bench 'TemperatureMaxC' $null) '0' ''))))
-        }else{$lines.Add((T 'EncoderVramUnavailable' 'GPU-minnesmätning: Ej tillgänglig för denna backend i denna version.'))}
+            $lines.Add((T 'EncoderVramLine' 'VRAM used max: {0} MB (increase during test {1} MB)' @((Format-OptionalNumber (P $bench 'VramPeakMB' $null) '0' ''),(Format-OptionalNumber (P $bench 'VramDeltaMB' $null) '0' ''))))
+            $lines.Add((T 'EncoderUtilLine' 'Encoder/GPU max: {0}% / {1}% | Max temperature: {2} °C' @((Format-OptionalNumber (P $bench 'EncoderUtilMax' $null) '0' ''),(Format-OptionalNumber (P $bench 'GpuUtilMax' $null) '0' ''),(Format-OptionalNumber (P $bench 'TemperatureMaxC' $null) '0' ''))))
+        }else{$lines.Add((T 'EncoderVramUnavailable' 'GPU memory measurement: Not available for this backend in this version.'))}
     }
     $caps=P $Encoder 'Capabilities' $null
     if($caps){
         $lines.Add('')
-        $lines.Add((T 'EncoderCapabilitiesHeader' 'Verifierade funktioner'))
+        $lines.Add((T 'EncoderCapabilitiesHeader' 'Checked features'))
         foreach($p in $caps.PSObject.Properties){$lines.Add(('{0}: {1}' -f $p.Name,$(if([bool]$p.Value){'✓'}else{'✗'})))}
     }
     $reason=[string](P $Encoder 'Reason' '')
@@ -1284,8 +1671,8 @@ function Show-EncoderDetailPanel {
     if($null-eq$encoderCapabilityList){return}
     $encoderCapabilityList.Items.Clear()
     if($null-eq$Encoder){
-        $encoderDetailsTitle.Text=T 'EncoderDetailsSelected' 'Detaljer för vald videoencoder'
-        $encoderBenchmarkLabel.Text=T 'EncoderRunCheckHelp' 'Kör kontrollen för att verifiera CPU/GPU och FFmpeg-funktioner.'
+        $encoderDetailsTitle.Text=T 'EncoderDetailsSelected' 'Selected video encoder details'
+        $encoderBenchmarkLabel.Text=T 'EncoderRunCheckHelp' 'Run the check to verify CPU/GPU, HEVC encoders, compatible features and benchmark results.'
         return
     }
     $name=[string](P $Encoder 'HardwareName' '')
@@ -1293,30 +1680,30 @@ function Show-EncoderDetailPanel {
     $encoderDetailsTitle.Text=('{0} — {1}' -f $name,$backend)
     $bench=P $Encoder 'Benchmark' $null
     $summary=New-Object System.Collections.Generic.List[string]
-    if(-not [string]::IsNullOrWhiteSpace($CheckedLocal)){$summary.Add((T 'EncoderLastCheckShort' 'Senaste kontroll: {0}' @($CheckedLocal)))}
+    if(-not [string]::IsNullOrWhiteSpace($CheckedLocal)){$summary.Add((T 'EncoderLastCheckShort' 'Last check: {0}' @($CheckedLocal)))}
     if($bench){
         $speed=Format-OptionalNumber (P $bench 'SpeedX' $null) '0.00' '-'
         $ssim=Format-OptionalNumber (P $bench 'SSIM' $null) '0.0000' '-'
-        $summary.Add((T 'EncoderBenchShort' 'Hastighet: {0}x   SSIM: {1}' @($speed,$ssim)))
+        $summary.Add((T 'EncoderBenchShort' 'Speed: {0}x   SSIM: {1}' @($speed,$ssim)))
         if($backend-eq'NVENC'){
             $vram=Format-OptionalNumber (P $bench 'VramPeakMB' $null) '0' '-'
             $delta=Format-OptionalNumber (P $bench 'VramDeltaMB' $null) '0' '-'
-            $summary.Add((T 'EncoderVramShort' 'VRAM max: {0} MB   Ökning: {1} MB' @($vram,$delta)))
+            $summary.Add((T 'EncoderVramShort' 'VRAM max: {0} MB   Increase: {1} MB' @($vram,$delta)))
         }
-    }else{$summary.Add((T 'EncoderBenchmarkPending' 'Benchmark: väntar / pågår'))}
+    }else{$summary.Add((T 'EncoderBenchmarkPending' 'Benchmark: waiting / running'))}
     $encoderBenchmarkLabel.Text=($summary -join [Environment]::NewLine)
     foreach($row in @(Get-EncoderCapabilityRows $Encoder)){
         $item=New-Object Windows.Forms.ListViewItem
         $item.Text=[string]$row.Name
         $ok=[bool]$row.Passed
-        [void]$item.SubItems.Add($(if($ok){'✓ '+(T 'Supported' 'Godkänd')}else{'✗ '+(T 'NotSupported' 'Ej stödd')}))
+        [void]$item.SubItems.Add($(if($ok){'✓ '+(T 'Supported' 'Passed')}else{'✗ '+(T 'NotSupported' 'Not supported')}))
         $item.ForeColor=if($ok){[Drawing.Color]::FromArgb(0,145,80)}else{[Drawing.Color]::FromArgb(190,40,40)}
         [void]$encoderCapabilityList.Items.Add($item)
     }
     $reason=[string](P $Encoder 'Reason' '')
     if(-not [string]::IsNullOrWhiteSpace($reason)){
         $item=New-Object Windows.Forms.ListViewItem
-        $item.Text=T 'EncoderFailure' 'Fel'
+        $item.Text=T 'EncoderFailure' 'Error'
         [void]$item.SubItems.Add($reason)
         $item.ForeColor=[Drawing.Color]::FromArgb(190,40,40)
         [void]$encoderCapabilityList.Items.Add($item)
@@ -1341,10 +1728,10 @@ $header=New-Object Windows.Forms.Panel
 $header.Dock='Top';$header.Height=112;$header.BackColor=$script:ThemePalette.Banner
 $form.Controls.Add($header)
 $title=New-Label 'MediaPrep MKV Toolkit' 32 10 390 43 25 $true;$title.ForeColor=$script:ThemePalette.BannerText;$header.Controls.Add($title)
-$subtitle=New-Label (T 'AppSubtitleBase' 'Kö • UNC-import • Muxning') 35 53 385 48 10 $false;$subtitle.ForeColor=$script:ThemePalette.BannerText;$header.Controls.Add($subtitle)
-# Processdiagnostik visas i två kolumner i mitten av bannern för bättre läsbarhet.
+$subtitle=New-Label (T 'AppSubtitleBase' 'Queue • UNC import • Muxing') 35 53 385 48 10 $false;$subtitle.ForeColor=$script:ThemePalette.BannerText;$header.Controls.Add($subtitle)
+# Process diagnostics are shown in two columns in the banner for better readability.
 $processLabel=New-Label '' 430 10 390 94 8.2 $false;$processLabel.ForeColor=$script:ThemePalette.BannerText;$processLabel.Font=New-Object Drawing.Font('Consolas',8.2);$header.Controls.Add($processLabel)
-$version=New-Label 'Start Center 3.3.52  |  MediaPrep MKV Toolkit 0.11.52' 820 18 390 22 9 $false;$version.TextAlign='MiddleRight';$version.ForeColor=$script:ThemePalette.BannerText;$version.Anchor='Top,Right';$header.Controls.Add($version)
+$version=New-Label 'Start Center 3.3.53  |  MediaPrep MKV Toolkit 0.11.53' 820 18 390 22 9 $false;$version.TextAlign='MiddleRight';$version.ForeColor=$script:ThemePalette.BannerText;$version.Anchor='Top,Right';$header.Controls.Add($version)
 $toolVersionLabel=New-Label '' 820 42 390 22 8.8 $false;$toolVersionLabel.TextAlign='MiddleRight';$toolVersionLabel.ForeColor=$script:ThemePalette.BannerText;$toolVersionLabel.Anchor='Top,Right';$header.Controls.Add($toolVersionLabel)
 $author=New-Label (T 'AuthorCredit' 'Created by Anders Syrén') 820 66 390 22 9 $false;$author.TextAlign='MiddleRight';$author.ForeColor=$script:ThemePalette.BannerText;$author.Anchor='Top,Right';$header.Controls.Add($author)
 
@@ -1369,7 +1756,7 @@ $rAll=New-Object Windows.Forms.RadioButton;$rAll.Text=T 'AllInOneMode' 'All in o
 $queueStatus=New-Label '' 300 27 510 30 10 $true;$queueStatus.Anchor='Top,Left,Right';$workGroup.Controls.Add($queueStatus)
 
 $queueStatsPanel=New-Object Windows.Forms.GroupBox
-$queueStatsPanel.Text=T 'QueueStatistics' 'Statistics'
+$queueStatsPanel.Text=T 'QueueStatistics' 'Queue statistics'
 # Dedicated statistics area in the upper-right part of Work queue.
 # It deliberately does not overlap the queue ListBox (which starts at Y=150).
 $queueStatsPanel.Location=New-Object Drawing.Point(470,55)
@@ -1413,7 +1800,7 @@ $workGroup.Controls.Add($outputLabel)
 $tempOutput=New-Object Windows.Forms.TextBox;$tempOutput.Location=New-Object Drawing.Point(210,90);$tempOutput.Size=New-Object Drawing.Size(615,26);$tempOutput.Anchor='Top,Left,Right';$workGroup.Controls.Add($tempOutput)
 $sourceBrowse=$sourceLabel
 $outputBrowse=$outputLabel
-$allHint=New-Label (T 'AllInOneHint' 'Temporary paths apply only to this run.') 210 118 610 23 8.5 $false;$allHint.ForeColor=[Drawing.Color]::FromArgb(85,95,108);$allHint.Anchor='Top,Left,Right';$workGroup.Controls.Add($allHint)
+$allHint=New-Label (T 'AllInOneHint' 'Temporary paths apply only to this run. Change permanent defaults in Preferences.') 210 118 610 23 8.5 $false;$allHint.ForeColor=[Drawing.Color]::FromArgb(85,95,108);$allHint.Anchor='Top,Left,Right';$workGroup.Controls.Add($allHint)
 
 # One clean vertical command row for both Queue and All-in-one modes.
 $buttonPanel=New-Object Windows.Forms.Panel;$buttonPanel.Location=New-Object Drawing.Point(18,150);$buttonPanel.Size=New-Object Drawing.Size(175,385);$buttonPanel.Anchor='Top,Bottom,Left';$workGroup.Controls.Add($buttonPanel)
@@ -1421,14 +1808,14 @@ $bLoad=New-Object Windows.Forms.Button;$bLoad.Text=T 'AddToQueue' 'Add to queue'
 $bRemove=New-Object Windows.Forms.Button;$bRemove.Text=T 'Remove' 'Remove';$bRemove.Location=New-Object Drawing.Point(0,46);$bRemove.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bRemove)
 $bUp=New-Object Windows.Forms.Button;$bUp.Text=T 'MoveUp' 'Move up';$bUp.Location=New-Object Drawing.Point(0,92);$bUp.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bUp)
 $bDown=New-Object Windows.Forms.Button;$bDown.Text=T 'MoveDown' 'Move down';$bDown.Location=New-Object Drawing.Point(0,138);$bDown.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bDown)
-$bSaveQueue=New-Object Windows.Forms.Button;$bSaveQueue.Text=T 'SaveQueue' 'Spara kö';$bSaveQueue.Location=New-Object Drawing.Point(0,184);$bSaveQueue.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bSaveQueue)
-$bOpenQueue=New-Object Windows.Forms.Button;$bOpenQueue.Text=T 'OpenQueue' 'Öppna kö';$bOpenQueue.Location=New-Object Drawing.Point(0,230);$bOpenQueue.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bOpenQueue)
+$bSaveQueue=New-Object Windows.Forms.Button;$bSaveQueue.Text=T 'SaveQueue' 'Save queue';$bSaveQueue.Location=New-Object Drawing.Point(0,184);$bSaveQueue.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bSaveQueue)
+$bOpenQueue=New-Object Windows.Forms.Button;$bOpenQueue.Text=T 'OpenQueue' 'Open queue';$bOpenQueue.Location=New-Object Drawing.Point(0,230);$bOpenQueue.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bOpenQueue)
 $bOpenLog=New-Object Windows.Forms.Button;$bOpenLog.Text=T 'LogsButton' 'Logs';$bOpenLog.Visible=$false
 $bOpenOutput=New-Object Windows.Forms.Button;$bOpenOutput.Text=T 'OpenOutputFolder' 'Processed videos';$bOpenOutput.Location=New-Object Drawing.Point(0,276);$bOpenOutput.Size=New-Object Drawing.Size(155,38);$buttonPanel.Controls.Add($bOpenOutput)
 $bOrganize=New-Object Windows.Forms.Button;$bOrganize.Text=T 'OrganizeFolders' 'Sort into folders';$bOrganize.Location=New-Object Drawing.Point(0,322);$bOrganize.Size=New-Object Drawing.Size(155,48);$buttonPanel.Controls.Add($bOrganize)
 
 $queueList=New-Object Windows.Forms.ListBox;$queueList.Location=New-Object Drawing.Point(200,150);$queueList.Size=New-Object Drawing.Size(625,335);$queueList.Font=New-Object Drawing.Font('Consolas',9.5);$queueList.Anchor='Top,Bottom,Left,Right';$queueList.HorizontalScrollbar=$true;$workGroup.Controls.Add($queueList)
-$cDelete=New-Check (T 'DeleteSources' 'Delete source files after verified return') 200 495 610;$cDelete.Anchor='Bottom,Left,Right';$workGroup.Controls.Add($cDelete)
+$cDelete=New-Check (T 'DeleteSources' 'Delete old TS/MP4/AVI/MPG/MPEG files and used subtitles only after verified MKV return') 200 495 610;$cDelete.Anchor='Bottom,Left,Right';$workGroup.Controls.Add($cDelete)
 
 # Options tab: run mode and encoding criteria at the top, operational
 # choices below, matching the cleaner overview-style layout.
@@ -1474,7 +1861,7 @@ $optionsGroup.Size=New-Object Drawing.Size(1162,313)
 $optionsGroup.Anchor='Top,Left,Right'
 $tabOptions.Controls.Add($optionsGroup)
 $cMux=New-Check (T 'AutoMux' 'Start muxing automatically') 15 30 535
-$cEncode=New-Check (T 'EnableEncoding' 'Enable MKV encoding for recommended files') 15 70 535
+$cEncode=New-Check (T 'EnableEncoding' 'Reduce file size by encoding recommended MKV files') 15 70 535
 $cForce=New-Check (T 'ForceRemux' 'Force remuxing') 15 110 535
 $cReanalyze=New-Check (T 'Reanalyze' 'Analyze all MKV files again') 15 150 535
 $cRebuild=New-Check (T 'RebuildIndex' 'Rebuild scan and analysis indexes') 15 190 535
@@ -1489,8 +1876,8 @@ $uacShield.Size=New-Object Drawing.Size(22,22)
 $uacShield.SizeMode=[Windows.Forms.PictureBoxSizeMode]::StretchImage
 try{$uacShield.Image=[Drawing.SystemIcons]::Shield.ToBitmap()}catch{}
 $uacShield.TabStop=$false
-$cUpdates=New-Check (T 'PreventUpdates' 'Prevent automatic Windows Update restart during the queue') 618 190 517
-$cVerbose=New-Check (T 'Verbose' 'Verbose logging') 590 230 545
+$cUpdates=New-Check (T 'PreventUpdates' 'Prevent automatic Windows Update restart during the queue (administrator required)') 618 190 517
+$cVerbose=New-Check (T 'Verbose' 'Verbose logging – capture startup errors and detailed diagnostics') 590 230 545
 $optionsGroup.Controls.AddRange(@($cMux,$cEncode,$cForce,$cReanalyze,$cRebuild,$cIgnoreDecodeErrors,$cProcessErrorQueue,$cCloseConsole,$cSleep,$cShutdown,$uacShield,$cUpdates,$cVerbose))
 
 # Source formats are selectable per installation/run. Legacy formats remain on by default;
@@ -1545,7 +1932,7 @@ $optionsFooter.Controls.Add($bSaveOptions)
 
 # CPU/GPU tab: detected hardware, verified HEVC encoders and reproducible benchmark results.
 $hardwareInfoGroup=New-Object Windows.Forms.GroupBox
-$hardwareInfoGroup.Text=T 'HardwareDetected' 'Identifierad maskinvara'
+$hardwareInfoGroup.Text=T 'HardwareDetected' 'Detected hardware'
 $hardwareInfoGroup.Location=New-Object Drawing.Point(18,18)
 $hardwareInfoGroup.Size=New-Object Drawing.Size(1125,118)
 $hardwareInfoGroup.Anchor='Top,Left,Right'
@@ -1554,19 +1941,19 @@ $hardwareInfoBox=New-Object Windows.Forms.RichTextBox
 $hardwareInfoBox.ReadOnly=$true;$hardwareInfoBox.BorderStyle='None';$hardwareInfoBox.Location=New-Object Drawing.Point(14,25);$hardwareInfoBox.Size=New-Object Drawing.Size(1095,80);$hardwareInfoBox.Anchor='Top,Bottom,Left,Right';$hardwareInfoBox.Font=New-Object Drawing.Font('Consolas',9.2);$hardwareInfoGroup.Controls.Add($hardwareInfoBox)
 
 $encoderGroup=New-Object Windows.Forms.GroupBox
-$encoderGroup.Text=T 'VideoEncoder' 'Videoencoder'
+$encoderGroup.Text=T 'VideoEncoder' 'Video encoder'
 $encoderGroup.Location=New-Object Drawing.Point(18,148)
 $encoderGroup.Size=New-Object Drawing.Size(1125,410)
 $encoderGroup.Anchor='Top,Bottom,Left,Right'
 $tabHardware.Controls.Add($encoderGroup)
-$encoderSelectLabel=New-Label (T 'SelectedVideoEncoder' 'Vald videoencoder') 18 28 170 24 9.5 $true;$encoderGroup.Controls.Add($encoderSelectLabel)
-# Dropdown och vänsteröversikt har samma högra kant.
+$encoderSelectLabel=New-Label (T 'SelectedVideoEncoder' 'Selected video encoder') 18 28 170 24 9.5 $true;$encoderGroup.Controls.Add($encoderSelectLabel)
+# The dropdown and left summary share the same right edge.
 $encoderCombo=New-Object Windows.Forms.ComboBox;$encoderCombo.DropDownStyle='DropDownList';$encoderCombo.Location=New-Object Drawing.Point(190,25);$encoderCombo.Size=New-Object Drawing.Size(478,29);$encoderCombo.Anchor='Top,Left';$encoderGroup.Controls.Add($encoderCombo)
 $encoderStatusLabel=New-Label '' 18 62 650 24 9.2 $false;$encoderStatusLabel.Anchor='Top,Left';$encoderGroup.Controls.Add($encoderStatusLabel)
 
-# Kontrollknappen finns endast på CPU/GPU-fliken, ovanför detaljpanelen.
+# The check button exists only on the CPU/GPU tab, above the details panel.
 $encoderCheckButton=New-Object Windows.Forms.Button
-$encoderCheckButton.Text=T 'CheckAllEncoders' 'Kontrollera CPU/GPU'
+$encoderCheckButton.Text=T 'CheckAllEncoders' 'Check CPU/GPU'
 $encoderCheckButton.Location=New-Object Drawing.Point(682,23)
 $encoderCheckButton.Size=New-Object Drawing.Size(210,34)
 $encoderCheckButton.Anchor='Top,Left'
@@ -1574,7 +1961,7 @@ $encoderCheckButton.Font=New-Object Drawing.Font('Segoe UI',9.2,[Drawing.FontSty
 $encoderCheckButton.UseVisualStyleBackColor=$false
 $encoderGroup.Controls.Add($encoderCheckButton)
 $encoderRefreshButton=New-Object Windows.Forms.Button
-$encoderRefreshButton.Text=T 'RefreshHardware' 'Uppdatera maskinvara'
+$encoderRefreshButton.Text=T 'RefreshHardware' 'Refresh hardware'
 $encoderRefreshButton.Location=New-Object Drawing.Point(900,23)
 $encoderRefreshButton.Size=New-Object Drawing.Size(208,34)
 $encoderRefreshButton.Anchor='Top,Left'
@@ -1582,20 +1969,20 @@ $encoderRefreshButton.UseVisualStyleBackColor=$false
 $encoderGroup.Controls.Add($encoderRefreshButton)
 $encoderProgress=New-Object Windows.Forms.ProgressBar;$encoderProgress.Location=New-Object Drawing.Point(682,64);$encoderProgress.Size=New-Object Drawing.Size(426,18);$encoderProgress.Anchor='Top,Left';$encoderProgress.Minimum=0;$encoderProgress.Maximum=100;$encoderProgress.Value=0;$encoderGroup.Controls.Add($encoderProgress)
 
-# Vänster: kompakt översikt av samtliga identifierade encoders.
+# Left: compact overview of all detected encoders.
 $encoderList=New-Object Windows.Forms.ListView
 $encoderList.Location=New-Object Drawing.Point(18,94);$encoderList.Size=New-Object Drawing.Size(650,292);$encoderList.Anchor='Top,Bottom,Left';$encoderList.View=[Windows.Forms.View]::Details;$encoderList.FullRowSelect=$true;$encoderList.GridLines=$true;$encoderList.HideSelection=$false
-[void]$encoderList.Columns.Add((T 'EncoderColumnHardware' 'Hårdvara'),245)
-[void]$encoderList.Columns.Add((T 'EncoderColumnBackend' 'Teknik'),70)
+[void]$encoderList.Columns.Add((T 'EncoderColumnHardware' 'Hardware'),245)
+[void]$encoderList.Columns.Add((T 'EncoderColumnBackend' 'Backend'),70)
 [void]$encoderList.Columns.Add((T 'EncoderColumnStatus' 'Status'),110)
-[void]$encoderList.Columns.Add((T 'EncoderColumnSpeed' 'Hastighet'),65)
+[void]$encoderList.Columns.Add((T 'EncoderColumnSpeed' 'Speed'),65)
 [void]$encoderList.Columns.Add((T 'EncoderColumnSsim' 'SSIM'),65)
 [void]$encoderList.Columns.Add((T 'EncoderColumnVram' 'VRAM max'),85)
 $encoderGroup.Controls.Add($encoderList)
 
-# Höger: en egen synlig grupp så testresultaten inte kan försvinna mot bakgrunden.
+# Right: dedicated visible group so test results cannot disappear into the background.
 $encoderDetailGroup=New-Object Windows.Forms.GroupBox
-$encoderDetailGroup.Text=T 'EncoderDetailsSelected' 'Detaljer för vald videoencoder'
+$encoderDetailGroup.Text=T 'EncoderDetailsSelected' 'Selected video encoder details'
 $encoderDetailGroup.Location=New-Object Drawing.Point(682,94)
 $encoderDetailGroup.Size=New-Object Drawing.Size(426,292)
 $encoderDetailGroup.Anchor='Top,Bottom,Left'
@@ -1605,30 +1992,35 @@ $encoderBenchmarkLabel=New-Label '' 12 48 398 64 9.0 $false;$encoderBenchmarkLab
 $encoderCapabilityList=New-Object Windows.Forms.ListView
 $encoderCapabilityList.Location=New-Object Drawing.Point(12,116);$encoderCapabilityList.Size=New-Object Drawing.Size(398,158);$encoderCapabilityList.Anchor='Top,Bottom,Left,Right';$encoderCapabilityList.View=[Windows.Forms.View]::Details;$encoderCapabilityList.FullRowSelect=$true;$encoderCapabilityList.GridLines=$true;$encoderCapabilityList.HideSelection=$false
 [void]$encoderCapabilityList.Columns.Add((T 'EncoderCapabilityColumn' 'Test'),225)
-[void]$encoderCapabilityList.Columns.Add((T 'EncoderResultColumn' 'Resultat'),150)
+[void]$encoderCapabilityList.Columns.Add((T 'EncoderResultColumn' 'Result'),150)
 $encoderDetailGroup.Controls.Add($encoderCapabilityList)
 
-$encoderFoot=New-Label (T 'EncoderCheckFootnote' 'Kön kan startas först när minst en encoder har verifierats. Kontroll görs om när FFmpeg, GPU eller grafikdrivrutin ändras.') 18 562 1120 38 8.8 $false;$encoderFoot.ForeColor=[Drawing.Color]::FromArgb(95,95,95);$encoderFoot.Anchor='Bottom,Left,Right';$tabHardware.Controls.Add($encoderFoot)
+$encoderFoot=New-Label (T 'EncoderCheckFootnote' 'The queue can start only after the selected encoder has been verified. Recheck after FFmpeg, GPU or graphics-driver changes.') 18 562 1120 38 8.8 $false;$encoderFoot.ForeColor=[Drawing.Color]::FromArgb(95,95,95);$encoderFoot.Anchor='Bottom,Left,Right';$tabHardware.Controls.Add($encoderFoot)
 
 $script:RefreshingEncoderUi=$false
 function Refresh-EncoderTab {
     $script:RefreshingEncoderUi=$true
     try{
-        $hardwareInfoBox.Text=Get-HardwareSummaryText
-        $doc=Get-EncoderCapabilitiesDocument
-        $current=Test-EncoderCapabilitiesCurrent $doc
-        $encoderList.Items.Clear();$encoderCombo.Items.Clear();$encoderCapabilityList.Items.Clear();$encoderBenchmarkLabel.Text='';$encoderDetailsTitle.Text=T 'EncoderDetailsSelected' 'Detaljer för vald videoencoder'
+        Start-StartupTiming 'EncoderHardwareSummary'
+        try{$hardwareInfoBox.Text=Get-HardwareSummaryText}finally{Stop-StartupTiming 'EncoderHardwareSummary'}
+        Start-StartupTiming 'EncoderCapabilitiesRead'
+        try{$doc=Get-EncoderCapabilitiesDocument}finally{Stop-StartupTiming 'EncoderCapabilitiesRead'}
+        Start-StartupTiming 'EncoderSignatureValidation'
+        try{$current=Test-EncoderCapabilitiesCurrent $doc}finally{Stop-StartupTiming 'EncoderSignatureValidation'}
+        Start-StartupTiming 'EncoderUiReset'
+        try{$encoderList.Items.Clear();$encoderCombo.Items.Clear();$encoderCapabilityList.Items.Clear();$encoderBenchmarkLabel.Text='';$encoderDetailsTitle.Text=T 'EncoderDetailsSelected' 'Selected video encoder details'}finally{Stop-StartupTiming 'EncoderUiReset'}
         if(-not$current){
             # Show every detected candidate immediately, but clearly mark it as unverified.
             # This avoids the misleading impression that only CPU is supported before the first test.
-            $detected=@(Get-DetectedEncoderCandidates)
+            Start-StartupTiming 'DetectedEncoderCandidates'
+            try{$detected=@(Get-DetectedEncoderCandidates)}finally{Stop-StartupTiming 'DetectedEncoderCandidates'}
             foreach($enc in $detected){
                 $display=Get-DetectedEncoderDisplayText $enc
                 [void]$encoderCombo.Items.Add([pscustomobject]@{Id=[string]$enc.Id;Display=$display;Encoder=$enc;Verified=$false})
                 $item=New-Object Windows.Forms.ListViewItem
                 $item.Text=[string]$enc.HardwareName
                 [void]$item.SubItems.Add([string]$enc.Backend)
-                [void]$item.SubItems.Add(('○ '+(T 'EncoderNotChecked' 'Ej kontrollerad')))
+                [void]$item.SubItems.Add(('○ '+(T 'EncoderNotChecked' 'Not checked')))
                 [void]$item.SubItems.Add('-')
                 [void]$item.SubItems.Add('-')
                 [void]$item.SubItems.Add('-')
@@ -1641,47 +2033,63 @@ function Refresh-EncoderTab {
                 if([string]$encoderCombo.Items[$i].Id -eq [string]$script:Prefs.SelectedEncoderId){$selectedIndex=$i;break}
             }
             if($encoderCombo.Items.Count-gt0){$encoderCombo.SelectedIndex=$selectedIndex}
-            $encoderStatusLabel.Text=if($null-eq$doc){T 'EncoderCheckRequired' 'CPU/GPU-kontroll krävs innan kön kan startas.'}else{T 'EncoderCheckStale' 'Tidigare kontroll gäller inte längre. FFmpeg, GPU eller drivrutin har ändrats.'}
+            $encoderStatusLabel.Text=if($null-eq$doc){T 'EncoderCheckRequired' 'A CPU/GPU check is required before the queue can start.'}else{T 'EncoderCheckStale' 'The previous check is no longer valid. FFmpeg, GPU or graphics driver changed.'}
             $encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(170,95,20)
             Show-EncoderDetailPanel -Encoder $null
             return
         }
         $encoders=@(P $doc 'Encoders' @())
         $fastestId=[string](P $doc 'FastestEncoderId' '')
-        foreach($enc in $encoders){
-            $verified=[bool](P $enc 'Verified' $false)
-            $bench=P $enc 'Benchmark' $null
-            $statusText=if($verified){'✓ '+(T 'EncoderVerified' 'Verifierad')}else{'✗ '+(T 'EncoderFailed' 'Misslyckades')}
-            if($verified -and [string]$enc.Id -eq $fastestId){$statusText+=' / '+(T 'EncoderFastest' 'Snabbast')}
-            $speed=if($bench -and $null -ne (P $bench 'SpeedX' $null)){('{0:N2}x' -f [double](P $bench 'SpeedX' 0))}else{'-'}
-            $ssim=if($bench -and $null -ne (P $bench 'SSIM' $null)){('{0:N4}' -f [double](P $bench 'SSIM' 0))}else{'-'}
-            $vram=if($bench -and $null -ne (P $bench 'VramPeakMB' $null)){('{0:N0} MB' -f [double](P $bench 'VramPeakMB' 0))}else{'-'}
-            $item=New-Object Windows.Forms.ListViewItem
-            $item.Text=[string]$enc.HardwareName
-            [void]$item.SubItems.Add([string]$enc.Backend)
-            [void]$item.SubItems.Add($statusText)
-            [void]$item.SubItems.Add($speed)
-            [void]$item.SubItems.Add($ssim)
-            [void]$item.SubItems.Add($vram)
-            $item.Tag=$enc
-            [void]$encoderList.Items.Add($item)
-            if($verified){[void]$encoderCombo.Items.Add([pscustomobject]@{Id=[string]$enc.Id;Display=(Get-EncoderDisplayText $enc);Encoder=$enc})}
-        }
-        $encoderCombo.DisplayMember='Display'
-        $selectedIndex=-1
-        for($i=0;$i-lt$encoderCombo.Items.Count;$i++){if([string]$encoderCombo.Items[$i].Id -eq [string]$script:Prefs.SelectedEncoderId){$selectedIndex=$i;break}}
-        if($selectedIndex-lt0 -and $encoderCombo.Items.Count-gt0){
-            for($i=0;$i-lt$encoderCombo.Items.Count;$i++){if([string]$encoderCombo.Items[$i].Id -eq 'cpu-libx265'){$selectedIndex=$i;break}}
-            if($selectedIndex-lt0){$selectedIndex=0}
-            $script:Prefs.SelectedEncoderId=[string]$encoderCombo.Items[$selectedIndex].Id
-            Write-Json $script:PreferencesPath $script:Prefs;Apply-Prefs-ToConfig
-        }
-        if($selectedIndex-ge0){$encoderCombo.SelectedIndex=$selectedIndex;Show-EncoderDetailPanel -Encoder $encoderCombo.Items[$selectedIndex].Encoder -CheckedLocal ([string](P $doc 'CheckedLocal' ''))}
-        $checked=[string](P $doc 'CheckedLocal' '')
-        $verifiedCount=@($encoders | Where-Object {[bool](P $_ 'Verified' $false)}).Count
-        $encoderStatusLabel.Text=(T 'EncoderCheckSummary' 'Senaste kontroll: {0} | Resultat: {1}/{2} verifierade' @($checked,$verifiedCount,$encoders.Count))
-        $encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
-    }finally{$script:RefreshingEncoderUi=$false;Update-EncoderBanner;Update-EncoderStartGate}
+        Start-StartupTiming 'EncoderVerifiedListBuild'
+        try{
+            foreach($enc in $encoders){
+                $verified=[bool](P $enc 'Verified' $false)
+                $bench=P $enc 'Benchmark' $null
+                $statusText=if($verified){'✓ '+(T 'EncoderVerified' 'Verified')}else{'✗ '+(T 'EncoderFailed' 'Failed')}
+                if($verified -and [string]$enc.Id -eq $fastestId){$statusText+=' / '+(T 'EncoderFastest' 'Fastest')}
+                $speed=if($bench -and $null -ne (P $bench 'SpeedX' $null)){('{0:N2}x' -f [double](P $bench 'SpeedX' 0))}else{'-'}
+                $ssim=if($bench -and $null -ne (P $bench 'SSIM' $null)){('{0:N4}' -f [double](P $bench 'SSIM' 0))}else{'-'}
+                $vram=if($bench -and $null -ne (P $bench 'VramPeakMB' $null)){('{0:N0} MB' -f [double](P $bench 'VramPeakMB' 0))}else{'-'}
+                $item=New-Object Windows.Forms.ListViewItem
+                $item.Text=[string]$enc.HardwareName
+                [void]$item.SubItems.Add([string]$enc.Backend)
+                [void]$item.SubItems.Add($statusText)
+                [void]$item.SubItems.Add($speed)
+                [void]$item.SubItems.Add($ssim)
+                [void]$item.SubItems.Add($vram)
+                $item.Tag=$enc
+                [void]$encoderList.Items.Add($item)
+                if($verified){[void]$encoderCombo.Items.Add([pscustomobject]@{Id=[string]$enc.Id;Display=(Get-EncoderDisplayText $enc);Encoder=$enc})}
+            }
+        }finally{Stop-StartupTiming 'EncoderVerifiedListBuild'}
+        Start-StartupTiming 'EncoderSelectionApply'
+        try{
+            $encoderCombo.DisplayMember='Display'
+            $selectedIndex=-1
+            for($i=0;$i-lt$encoderCombo.Items.Count;$i++){if([string]$encoderCombo.Items[$i].Id -eq [string]$script:Prefs.SelectedEncoderId){$selectedIndex=$i;break}}
+            if($selectedIndex-lt0 -and $encoderCombo.Items.Count-gt0){
+                # Never overwrite the user's saved encoder merely because it is temporarily
+                # unavailable or not present in the current verified list. CPU is the first-run
+                # default only. A later encoder change must always be an explicit user choice.
+                for($i=0;$i-lt$encoderCombo.Items.Count;$i++){if([string]$encoderCombo.Items[$i].Id -eq 'cpu-libx265'){$selectedIndex=$i;break}}
+                if($selectedIndex-lt0){$selectedIndex=0}
+            }
+            if($selectedIndex-ge0){$encoderCombo.SelectedIndex=$selectedIndex;Show-EncoderDetailPanel -Encoder $encoderCombo.Items[$selectedIndex].Encoder -CheckedLocal ([string](P $doc 'CheckedLocal' ''))}
+        }finally{Stop-StartupTiming 'EncoderSelectionApply'}
+        Start-StartupTiming 'EncoderStatusSummary'
+        try{
+            $checked=[string](P $doc 'CheckedLocal' '')
+            $verifiedCount=@($encoders | Where-Object {[bool](P $_ 'Verified' $false)}).Count
+            $encoderStatusLabel.Text=(T 'EncoderCheckSummary' 'Last check: {0} | Result: {1}/{2} verified' @($checked,$verifiedCount,$encoders.Count))
+            $encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
+        }finally{Stop-StartupTiming 'EncoderStatusSummary'}
+    }finally{
+        $script:RefreshingEncoderUi=$false
+        Start-StartupTiming 'EncoderBannerRefreshInsideTab'
+        try{Update-EncoderBanner}finally{Stop-StartupTiming 'EncoderBannerRefreshInsideTab'}
+        Start-StartupTiming 'EncoderStartGateInsideTab'
+        try{Update-EncoderStartGate}finally{Stop-StartupTiming 'EncoderStartGateInsideTab'}
+    }
 }
 function Test-EncoderToolPreflight {
     $missing=New-Object System.Collections.Generic.List[string]
@@ -1698,14 +2106,15 @@ function Test-EncoderToolPreflight {
 
 function Invoke-EncoderCheck {
     if(-not(Test-EncoderToolPreflight)){return}
-    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show((T 'EncoderCannotCheckWhileRunning' 'CPU/GPU-kontrollen kan inte köras medan kön arbetar.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
+    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show((T 'EncoderCannotCheckWhileRunning' 'The CPU/GPU check cannot run while the queue is active.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
     if(-not(Test-Path -LiteralPath $script:EncoderTestScript -PathType Leaf)){throw ('MediaPrep-Encoder-Test.ps1 saknas: '+$script:EncoderTestScript)}
     Save-VisibleWorkList
     foreach($key in $script:PrefBoxes.Keys){$script:Prefs.$key=$script:PrefBoxes[$key].Text.Trim()}
     Write-Json $script:PreferencesPath $script:Prefs;Apply-Prefs-ToConfig
     Remove-Item -LiteralPath $script:EncoderTestStatusPath -Force -ErrorAction SilentlyContinue
+    Clear-EncoderSessionSignature
     $encoderCheckButton.Enabled=$false;$encoderRefreshButton.Enabled=$false;if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$false};$encoderProgress.Value=0
-    $encoderStatusLabel.Text=T 'EncoderChecking' 'Kontrollerar CPU/GPU och kör benchmark...';$encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(55,95,135)
+    $encoderStatusLabel.Text=T 'EncoderChecking' 'Checking CPU/GPU and running benchmark...';$encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(55,95,135)
     [Windows.Forms.Application]::DoEvents()
     try{
         $argString='-NoProfile -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -BenchmarkSeconds {2}' -f $script:EncoderTestScript,$script:Root,[int]$script:Prefs.EncoderBenchmarkSeconds
@@ -1728,9 +2137,11 @@ function Invoke-EncoderCheck {
             [Windows.Forms.Application]::DoEvents();Start-Sleep -Milliseconds 250
         }
         $proc.WaitForExit();$exitCode=$proc.ExitCode;$proc.Dispose();$encoderProgress.Value=100
+        $freshDoc=Get-EncoderCapabilitiesDocument
+        if($exitCode-eq0 -and $null-ne$freshDoc){[void](Set-SessionHardwareFromEncoderDocument -Document $freshDoc -Persist)}else{[void](Get-HardwareSnapshot -ForceRefresh -Persist)}
         Refresh-EncoderTab
         if($exitCode-eq0){Show-EncoderFailureSummary}
-        if($exitCode-ne0){[Windows.Forms.MessageBox]::Show((T 'EncoderCheckFailedMessage' 'Encoderkontrollen misslyckades. Se encoder-testloggen i Loggar.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null}
+        if($exitCode-ne0){[Windows.Forms.MessageBox]::Show((T 'EncoderCheckFailedMessage' 'The encoder check failed. See the encoder test log in the Loggar folder.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null}
     }finally{$encoderCheckButton.Enabled=$true;$encoderRefreshButton.Enabled=$true;if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$true};Update-EncoderStartGate}
 }
 function Test-EncoderReadyForQueueSilent {
@@ -1754,10 +2165,11 @@ function Update-EncoderStartGate {
     if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$true}
 }
 function Test-EncoderReadyForQueue {
+    # Queue start is a safety boundary: refresh Windows hardware/driver data and FFmpeg before accepting cached verification.
     $doc=Get-EncoderCapabilitiesDocument
-    if(-not(Test-EncoderCapabilitiesCurrent $doc)){
+    if(-not(Test-EncoderCapabilitiesCurrent -Document $doc -ForceRefresh)){
         $tabs.SelectedTab=$tabHardware;Refresh-EncoderTab
-        [Windows.Forms.MessageBox]::Show((T 'EncoderRequiredBeforeQueue' 'CPU/GPU måste kontrolleras innan kön kan startas. Kör "Kontrollera CPU/GPU" på fliken CPU/GPU.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'EncoderRequiredBeforeQueue' 'CPU/GPU must be checked before the queue can start. Run "Check CPU/GPU" on the CPU/GPU tab.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         $encoderCheckButton.Select()
         $encoderCheckButton.Focus()
         Update-EncoderStartGate
@@ -1766,17 +2178,17 @@ function Test-EncoderReadyForQueue {
     $enc=Get-EncoderById -Document $doc -Id ([string]$script:Prefs.SelectedEncoderId)
     if($null-eq$enc -or -not[bool](P $enc 'Verified' $false)){
         $tabs.SelectedTab=$tabHardware;Refresh-EncoderTab
-        [Windows.Forms.MessageBox]::Show((T 'SelectedEncoderNotVerified' 'Vald videoencoder är inte verifierad. Välj en encoder som klarat kontrollen.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'SelectedEncoderNotVerified' 'The selected video encoder is not verified. Select an encoder that passed the check.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
         Update-EncoderStartGate
         return $false
     }
     return $true
 }
 $encoderCheckButton.Add_Click({try{Invoke-EncoderCheck}catch{Show-GuiError -ErrorRecord $_ -Context 'Encoder check'}})
-$encoderRefreshButton.Add_Click({Refresh-EncoderTab})
+$encoderRefreshButton.Add_Click({try{[void](Get-HardwareSnapshot -ForceRefresh -Persist);Refresh-EncoderTab}catch{Show-GuiError -ErrorRecord $_ -Context 'Refresh hardware'}})
 $encoderCombo.Add_SelectedIndexChanged({
     if($script:RefreshingEncoderUi -or $null-eq$encoderCombo.SelectedItem){return}
-    if($script:QueueRunActive){Refresh-EncoderTab;[Windows.Forms.MessageBox]::Show((T 'EncoderCannotChangeWhileRunning' 'Videoencoder kan inte bytas medan kön körs.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
+    if($script:QueueRunActive){Refresh-EncoderTab;[Windows.Forms.MessageBox]::Show((T 'EncoderCannotChangeWhileRunning' 'The video encoder cannot be changed while the queue is running.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
     $selected=$encoderCombo.SelectedItem
     if($null-ne$selected.Encoder -and [bool](P $selected.Encoder 'Verified' $false)){
         $script:Prefs.SelectedEncoderId=[string]$selected.Id
@@ -1926,26 +2338,34 @@ $systemCulture = [Globalization.CultureInfo]::CurrentUICulture
 $systemLanguageName = $systemCulture.NativeName
 $systemDisplay = (T 'SystemDefaultLanguage' 'System default — {0} ({1})' @($systemLanguageName,$systemCulture.Name))
 $resolvedSystemCode = Get-SystemLanguageCode
-$resolvedSystemFile = Join-Path (Join-Path $script:Root 'Languages') ("mediaprep.{0}.local" -f $resolvedSystemCode)
-$resolvedSystemObject = Read-Json $resolvedSystemFile $null
+$resolvedSystemObject = Read-LanguageDocument (Get-LanguagePath $resolvedSystemCode)
 $resolvedSystemVersion = if($resolvedSystemObject){[string](P $resolvedSystemObject 'LanguageFileVersion' 'unknown')}else{'unknown'}
-[void]$langCombo.Items.Add([pscustomobject]@{Code='system';Display=$systemDisplay;Version=$resolvedSystemVersion})
-foreach($file in @(Get-ChildItem (Join-Path $script:Root 'Languages') -Filter 'mediaprep.*.local' -ErrorAction SilentlyContinue)){
-    $code=$file.BaseName.Split('.')[1]
-    $obj=Read-Json $file.FullName $null
-    $display=if($obj){[string](P $obj 'LanguageName' $code)}else{$code}
-    $localVersion=if($obj){[string](P $obj 'LanguageFileVersion' 'unknown')}else{'unknown'}
-    [void]$langCombo.Items.Add([pscustomobject]@{Code=$code;Display=$display;Version=$localVersion})
+[void]$langCombo.Items.Add([pscustomobject]@{Code='system';Display=$systemDisplay;Version=$resolvedSystemVersion;IsCurrent=($resolvedSystemVersion-eq$script:RequiredLanguageFileVersion)})
+foreach($entry in @(Get-InstalledLanguageDocuments | Sort-Object {[string](P -Object $_.Document -Name 'NativeName' -Default $_.Culture)})){
+    $obj=$entry.Document
+    $code=[string]$entry.Culture
+    $display=[string](P $obj 'NativeName' (P $obj 'LanguageName' $code))
+    $localVersion=[string](P $obj 'LanguageFileVersion' 'unknown')
+    [void]$langCombo.Items.Add([pscustomobject]@{Code=$code;Display=$display;Version=$localVersion;IsCurrent=($localVersion-eq$script:RequiredLanguageFileVersion)})
 }
 $langCombo.DisplayMember='Display'
+$normalizedPreference=Normalize-LanguagePreference ([string]$script:Prefs.Language)
 for($languageIndex=0;$languageIndex -lt @($langCombo.Items).Count;$languageIndex++){
-    if($langCombo.Items[$languageIndex].Code -eq $script:Prefs.Language){$langCombo.SelectedIndex=$languageIndex}
+    if([string]$langCombo.Items[$languageIndex].Code -ieq $normalizedPreference){$langCombo.SelectedIndex=$languageIndex;break}
 }
 if($langCombo.SelectedIndex -lt 0 -and @($langCombo.Items).Count -gt 0){$langCombo.SelectedIndex=0}
-$langCombo.Add_SelectedIndexChanged({if($langCombo.SelectedItem){$languageVersion.Text=(T 'LanguageFileVersionLabel' 'Language file version')+': '+[string]$langCombo.SelectedItem.Version}})
-if($langCombo.SelectedItem){$languageVersion.Text=(T 'LanguageFileVersionLabel' 'Language file version')+': '+[string]$langCombo.SelectedItem.Version}
+$updateLanguageVersionLabel={
+    if(-not $langCombo.SelectedItem){$languageVersion.Text='';return}
+    $version=[string]$langCombo.SelectedItem.Version
+    $languageVersion.Text=(T 'LanguageFileVersionLabel' 'Language file version')+': '+$version
+    if(-not[bool]$langCombo.SelectedItem.IsCurrent){
+        $languageVersion.Text+=' ('+(T 'LanguageFileExpected' 'expected {0}' @($script:RequiredLanguageFileVersion))+')'
+    }
+}
+$langCombo.Add_SelectedIndexChanged($updateLanguageVersionLabel)
+& $updateLanguageVersionLabel
 
-$themeTitle=New-Label (T 'ThemeLabel' 'Tema') 18 130 120 24 10 $true
+$themeTitle=New-Label (T 'ThemeLabel' 'Theme') 18 130 120 24 10 $true
 $rightPrefs.Controls.Add($themeTitle)
 $themeCombo=New-Object Windows.Forms.ComboBox
 $themeCombo.DropDownStyle='DropDownList'
@@ -1954,9 +2374,9 @@ $themeCombo.Size=New-Object Drawing.Size(253,29)
 $themeCombo.Anchor='Top,Left'
 $rightPrefs.Controls.Add($themeCombo)
 $themeItems=@(
-    [pscustomobject]@{Code='Light';Display=(T 'ThemeLight' 'Ljus')},
-    [pscustomobject]@{Code='Dark';Display=(T 'ThemeDark' 'Mörk')},
-    [pscustomobject]@{Code='Monthly';Display=(T 'ThemeMonthly' 'Per månad')},
+    [pscustomobject]@{Code='Light';Display=(T 'ThemeLight' 'Light')},
+    [pscustomobject]@{Code='Dark';Display=(T 'ThemeDark' 'Dark')},
+    [pscustomobject]@{Code='Monthly';Display=(T 'ThemeMonthly' 'By month')},
     [pscustomobject]@{Code='Custom';Display=(T 'ThemeCustom' 'Custom')}
 )
 foreach($themeItem in $themeItems){[void]$themeCombo.Items.Add($themeItem)}
@@ -1969,7 +2389,7 @@ $customThemePanel.Size=New-Object Drawing.Size(375,52)
 $rightPrefs.Controls.Add($customThemePanel)
 $customBannerLabel=New-Label (T 'ThemeBanner' 'Banner') 0 0 112 18 8 $false;$customThemePanel.Controls.Add($customBannerLabel)
 $customPanelLabel=New-Label (T 'ThemePanel' 'Panel') 127 0 112 18 8 $false;$customThemePanel.Controls.Add($customPanelLabel)
-$customBackgroundLabel=New-Label (T 'ThemeBackground' 'Bakgrund') 254 0 112 18 8 $false;$customThemePanel.Controls.Add($customBackgroundLabel)
+$customBackgroundLabel=New-Label (T 'ThemeBackground' 'Background') 254 0 112 18 8 $false;$customThemePanel.Controls.Add($customBackgroundLabel)
 $customBanner=New-Object Windows.Forms.TextBox;$customBanner.Location=New-Object Drawing.Point(0,20);$customBanner.Size=New-Object Drawing.Size(94,27);$customBanner.Text=[string]$script:Prefs.CustomThemeBanner;$customThemePanel.Controls.Add($customBanner)
 $customBannerSwatch=New-Object Windows.Forms.Panel;$customBannerSwatch.Location=New-Object Drawing.Point(97,20);$customBannerSwatch.Size=New-Object Drawing.Size(18,27);$customBannerSwatch.BorderStyle='FixedSingle';$customThemePanel.Controls.Add($customBannerSwatch)
 $customPanel=New-Object Windows.Forms.TextBox;$customPanel.Location=New-Object Drawing.Point(127,20);$customPanel.Size=New-Object Drawing.Size(94,27);$customPanel.Text=[string]$script:Prefs.CustomThemePanel;$customThemePanel.Controls.Add($customPanel)
@@ -2032,7 +2452,7 @@ function Update-ExternalToolStatus {
 
 
 $toolManagerButton=New-Object Windows.Forms.Button
-$toolManagerButton.Text=T 'ManageExternalTools' 'Check / download external tools'
+$toolManagerButton.Text=T 'ManageExternalTools' 'Versions / external tools'
 $toolManagerButton.Location=New-Object Drawing.Point(18,220)
 $toolManagerButton.Size=New-Object Drawing.Size(375,40)
 $toolManagerButton.Anchor='Top,Left'
@@ -2056,7 +2476,7 @@ function Reload-ToolPathsFromPreferences {
     Update-ExternalToolStatus
 }
 $toolManagerButton.Add_Click({
-    if($script:QueueRunActive){
+    if(Test-MediaPrepProcessingActive){
         [Windows.Forms.MessageBox]::Show((T 'ToolsBlockedWhileQueueRuns' 'External tools and MediaPrep versions cannot be changed while the queue is running. Stop the queue first.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         return
     }
@@ -2066,6 +2486,14 @@ $toolManagerButton.Add_Click({
     $toolProc=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$scriptPath+'"'),'-Root',('"'+$script:Root+'"'),'-Language',$language) -Wait -PassThru
     $requestPath=Join-Path $script:Prefs.DataFolder 'mediaprep-update-request.json'
     if(Test-Path -LiteralPath $requestPath -PathType Leaf){
+        # Re-check immediately before activation. A surviving/external queue worker must
+        # never be updated underneath, even if the tool manager was opened while idle.
+        if(Test-MediaPrepProcessingActive){
+            [Windows.Forms.MessageBox]::Show((T 'ToolsBlockedWhileQueueRuns' 'External tools and MediaPrep versions cannot be changed while the queue is running. Stop the queue first.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+            $status.Text=T 'ToolsBlockedWhileQueueRuns' 'External tools and MediaPrep versions cannot be changed while the queue is running. Stop the queue first.'
+            $status.ForeColor=[Drawing.Color]::FromArgb(155,90,20)
+            return
+        }
         $updater=Join-Path $script:AppFolder 'MediaPrep-Updater.ps1'
         if(-not(Test-Path -LiteralPath $updater -PathType Leaf)){
             [Windows.Forms.MessageBox]::Show((T 'UpdaterMissing' 'MediaPrep-Updater.ps1 is missing. The update was not started.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null
@@ -2075,11 +2503,15 @@ $toolManagerButton.Add_Click({
         # the entire App directory without depending on its own source file remaining there.
         $updaterTemp=Join-Path $script:Prefs.TempFolder ('MediaPrep-Updater-'+[guid]::NewGuid().ToString('N')+'.ps1')
         Copy-Item -LiteralPath $updater -Destination $updaterTemp -Force
+        # A deliberate update owns the UI cleanup. Close both the current dashboard
+        # and any orphaned dashboard from an earlier Start Center before activation.
+        Stop-QueueDashboardForUserExit -IncludeOrphaned
         $args='-NoProfile -ExecutionPolicy Bypass -File "'+$updaterTemp+'" -Root "'+$script:Root+'" -RequestFile "'+$requestPath+'" -ParentPid '+[string]$PID+' -DeleteSelf'
         Start-Process -FilePath 'powershell.exe' -ArgumentList $args -WindowStyle Hidden | Out-Null
         $status.Text=T 'MediaPrepUpdateStarting' 'MediaPrep updater is starting. Start Center will close and reopen after the update.'
         $status.ForeColor=[Drawing.Color]::FromArgb(55,95,135)
         [Windows.Forms.Application]::DoEvents()
+        $script:SuppressDashboardShutdownOnClose=$true
         $form.Close()
         return
     }
@@ -2097,7 +2529,7 @@ $bRefreshTools.Add_Click({Update-PathAndProgramStatus})
 
 # Dedicated queue-monitor button in Preferences (requested location in the right-hand program settings area).
 $bStats=New-Object Windows.Forms.Button
-$bStats.Text=T 'ShowStatistics' 'Visa statistik'
+$bStats.Text=T 'ShowStatistics' 'Show statistics'
 $bStats.Location=New-Object Drawing.Point(18,320)
 $bStats.Size=New-Object Drawing.Size(375,40)
 $bStats.Anchor='Top,Left'
@@ -2105,7 +2537,7 @@ $bStats.Font=New-Object Drawing.Font('Segoe UI',9.5,[Drawing.FontStyle]::Bold)
 $rightPrefs.Controls.Add($bStats)
 
 $bPrefsLogs=New-Object Windows.Forms.Button
-$bPrefsLogs.Text=T 'LogsButton' 'Loggar'
+$bPrefsLogs.Text=T 'LogsButton' 'Logs'
 $bPrefsLogs.Location=New-Object Drawing.Point(18,368)
 $bPrefsLogs.Size=New-Object Drawing.Size(375,40)
 $bPrefsLogs.Anchor='Top,Left'
@@ -2169,14 +2601,15 @@ function Request-ElevatedRestartAfterSave {
     Save-VisibleWorkList
     try{
         [void](Start-MediaPrepElevated)
-        $status.Text=T 'RestartingElevated' 'MediaPrep startas om med administratörsrättigheter...'
+        $status.Text=T 'RestartingElevated' 'MediaPrep is restarting with administrator privileges...'
         $status.ForeColor=[Drawing.Color]::FromArgb(55,95,135)
         [Windows.Forms.Application]::DoEvents()
+        $script:SuppressDashboardShutdownOnClose=$true
         $form.Close()
         return $true
     }catch [ComponentModel.Win32Exception]{
         if($_.Exception.NativeErrorCode -eq 1223){
-            [Windows.Forms.MessageBox]::Show((T 'ElevationCancelled' 'UAC-begäran avbröts. Inställningen är sparad men Windows Update-skyddet kan inte användas förrän MediaPrep startas som administratör.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+            [Windows.Forms.MessageBox]::Show((T 'ElevationCancelled' 'The UAC request was cancelled. The setting is saved, but Windows Update restart protection cannot be used until MediaPrep is running as administrator.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
             return $false
         }
         throw
@@ -2535,7 +2968,7 @@ function Update-Dashboard {
     $modeName=switch($settings.Mode){'AnalyzeOnly'{T 'ModeAnalyze' 'Analysis only'}'EncodeOnly'{T 'ModeEncode' 'Analyze and encode MKV'}default{T 'ModeFull' 'Full workflow'}}
     $workName=if($settings.WorkMode -eq 'AllInOne'){T 'AllInOneMode' 'All in one'}else{T 'QueueMode' 'Queue'}
     $options=New-Object Collections.Generic.List[string]
-    if($settings.NoConfirm){$options.Add((T 'AutoMux' 'Auto mux'))};if($settings.EncodeRecommended){$options.Add((T 'AutoEncode' 'Auto encode'))};if($settings.ShutdownAfterSuccess){$options.Add((T 'Shutdown' 'Shutdown'))};if($settings.PreventSleep){$options.Add((T 'PreventSleep' 'Prevent sleep'))};if($settings.PreventUpdateRestart){$options.Add((T 'PreventUpdates' 'Prevent updates'))};if($settings.VerboseLogging){$options.Add((T 'Verbose' 'Verbose'))};if($settings.IgnoreDecodeErrors){$options.Add((T 'IgnoreDecodeErrors' 'Ignore decode errors'))};if($settings.ProcessErrorQueue){$options.Add((T 'ProcessErrorQueue' 'Process error queue'))}
+    if($settings.NoConfirm){$options.Add((T 'AutoMux' 'Start muxing automatically'))};if($settings.EncodeRecommended){$options.Add((T 'AutoEncode' 'Automatically encode recommended files to HEVC'))};if($settings.ShutdownAfterSuccess){$options.Add((T 'Shutdown' 'Shut down computer when the entire queue completes without errors'))};if($settings.PreventSleep){$options.Add((T 'PreventSleep' 'Keep computer awake for the entire queue'))};if($settings.PreventUpdateRestart){$options.Add((T 'PreventUpdates' 'Prevent automatic Windows Update restart during the queue (administrator required)'))};if($settings.VerboseLogging){$options.Add((T 'Verbose' 'Verbose logging – capture startup errors and detailed diagnostics'))};if($settings.IgnoreDecodeErrors){$options.Add((T 'IgnoreDecodeErrors' 'Ignore decode errors'))};if($settings.ProcessErrorQueue){$options.Add((T 'ProcessErrorQueue' 'Process error queue'))}
     $optionText=if(@($options).Count -gt 0){'• '+($options -join "`r`n• ")}else{T 'None' 'None'}
     $summaryBox.Text=(T 'SummaryMode' 'Run mode: {0}' @($modeName))+"`r`n`r`n"+(T 'SummaryWorkMode' 'Work mode: {0}' @($workName))+"`r`n`r`n"+(T 'SummaryQueue' 'Items in queue: {0}' @($queueList.Items.Count))+"`r`n`r`n"+(T 'SummaryOptions' 'Enabled options: {0}' @("`r`n"+$optionText))
     if($script:QueueRunActive){$queueStatus.Text=T 'QueueRunning' 'Queue is running.'}else{$queueStatus.Text=T 'QueueIdle' 'Queue is not running.'}
@@ -2596,27 +3029,27 @@ function Save-VisibleWorkList {
 }
 
 function Save-QueuePackageInteractive {
-    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show('Stoppa kön innan du sparar den.','MediaPrep')|Out-Null;return}
+    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show((T 'QueueSaveBlocked' 'Stop the queue before saving it.'),'MediaPrep')|Out-Null;return}
     $folder=Join-Path $script:Prefs.DataFolder 'SavedQueues';if(-not(Test-Path -LiteralPath $folder)){New-Item -Path $folder -ItemType Directory -Force|Out-Null}
-    $dlg=New-Object Windows.Forms.SaveFileDialog;$dlg.Title='Spara MediaPrep-kö';$dlg.Filter='MediaPrep köpaket (*.zip)|*.zip';$dlg.InitialDirectory=$folder;$dlg.FileName=('MediaPrep-Queue_'+(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')+'.zip');$dlg.OverwritePrompt=$true
+    $dlg=New-Object Windows.Forms.SaveFileDialog;$dlg.Title=T 'QueueSaveDialogTitle' 'Save MediaPrep queue';$dlg.Filter=T 'QueuePackageFilter' 'MediaPrep queue package (*.zip)|*.zip';$dlg.InitialDirectory=$folder;$dlg.FileName=('MediaPrep-Queue_'+(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')+'.zip');$dlg.OverwritePrompt=$true
     if($dlg.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK){$dlg.Dispose();return}
     try{
         Save-VisibleWorkList
         $mode=if($rAll.Checked){'AllInOne'}else{'Queue'}
         [void](Save-QueuePackageCore -Destination $dlg.FileName -QueueItems @((Get-ListItems $queueList)) -WorkMode $mode)
-        $status.Text='Kön och tillhörande JSON/statistik sparades: '+$dlg.FileName;$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
+        $status.Text=T 'QueueSaveSuccess' 'The queue and related JSON/statistics were saved: {0}' @($dlg.FileName);$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
     }finally{$dlg.Dispose()}
 }
 function Load-QueuePackageInteractive {
-    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show('Stoppa den aktiva kön innan du öppnar en sparad kö.','MediaPrep')|Out-Null;return}
+    if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show((T 'QueueLoadBlocked' 'Stop the active queue before opening a saved queue.'),'MediaPrep')|Out-Null;return}
     $folder=Join-Path $script:Prefs.DataFolder 'SavedQueues';if(-not(Test-Path -LiteralPath $folder)){New-Item -Path $folder -ItemType Directory -Force|Out-Null}
-    $dlg=New-Object Windows.Forms.OpenFileDialog;$dlg.Title='Öppna sparad MediaPrep-kö';$dlg.Filter='MediaPrep köpaket (*.zip)|*.zip';$dlg.InitialDirectory=$folder;$dlg.Multiselect=$false
+    $dlg=New-Object Windows.Forms.OpenFileDialog;$dlg.Title=T 'QueueLoadDialogTitle' 'Open saved MediaPrep queue';$dlg.Filter=T 'QueuePackageFilter' 'MediaPrep queue package (*.zip)|*.zip';$dlg.InitialDirectory=$folder;$dlg.Multiselect=$false
     if($dlg.ShowDialog($form) -ne [Windows.Forms.DialogResult]::OK){$dlg.Dispose();return}
     $temp=Join-Path $script:Prefs.TempFolder ('QueueLoad_'+[Guid]::NewGuid().ToString('N'));New-Item -Path $temp -ItemType Directory -Force|Out-Null
     try{
         Expand-Archive -LiteralPath $dlg.FileName -DestinationPath $temp -Force
-        $meta=Read-Json -Path (Join-Path $temp 'queue-package.json') -Default $null;if($null -eq $meta){throw 'Paketet saknar queue-package.json.'}
-        # Bevara en eventuell aktuell, avslutad/pausad session innan den ersätts.
+        $meta=Read-Json -Path (Join-Path $temp 'queue-package.json') -Default $null;if($null -eq $meta){throw (T 'QueuePackageMissingMetadata' 'The package does not contain queue-package.json.')}
+        # Preserve any current completed/paused session before replacing it.
         if(Test-Path -LiteralPath $script:StatisticsCurrentPath -PathType Leaf){$cur=Read-Json $script:StatisticsCurrentPath $null;if($cur){[void](Save-SessionArchive $cur 'statistics-run-before-load')}}
         foreach($name in Get-QueueRuntimeJsonNames){$src=Join-Path $temp $name;if(Test-Path -LiteralPath $src -PathType Leaf){Copy-Item -LiteralPath $src -Destination (Join-Path $script:Prefs.DataFolder $name) -Force}}
         if(Test-Path -LiteralPath $script:StatisticsCurrentPath -PathType Leaf){
@@ -2632,8 +3065,8 @@ function Load-QueuePackageInteractive {
         if($mode -eq 'AllInOne'){$script:LocalItems=@($restoredItems)}else{$script:UncItems=@($restoredItems)}
         $queueList.Items.Clear();foreach($item in $restoredItems){if($item){[void]$queueList.Items.Add([string]$item)}}
         Update-Dashboard
-        $status.Text='Sparad kö öppnad: '+$dlg.FileName;$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
-    }catch{[Windows.Forms.MessageBox]::Show(('Kunde inte öppna köpaketet: '+$_.Exception.Message),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null}
+        $status.Text=T 'QueueLoadSuccess' 'Saved queue opened: {0}' @($dlg.FileName);$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
+    }catch{[Windows.Forms.MessageBox]::Show((T 'QueueLoadFailed' 'Could not open the queue package: {0}' @($_.Exception.Message)),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null}
     finally{Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue;$dlg.Dispose()}
 }
 
@@ -2644,7 +3077,7 @@ function Load-WorkItems {
         if($selectedFormats.Count-eq0){throw(T 'NoVideoFormatsSelected' 'No file formats are selected. Select at least one file format on the Options tab.')}
         $files=@(Get-ChildItem -LiteralPath $folder -File -Recurse -ErrorAction Stop|Where-Object{$selectedFormats -contains $_.Extension.ToLowerInvariant()}|Sort-Object FullName)
         $queueList.Items.Clear();foreach($file in $files){[void]$queueList.Items.Add($file.FullName)};Save-VisibleWorkList
-        $status.Text=T 'LocalFilesLoadedSelectedFormats' 'Loaded {0} files matching the selected formats.' @(@($files).Count);$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
+        $status.Text=T 'LocalFilesLoadedSelectedFormats' 'Loaded {0} local file(s) matching the selected file formats.' @(@($files).Count);$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
     }else{
         $folder=Select-Folder ''
         if($folder){
@@ -2653,8 +3086,8 @@ function Load-WorkItems {
                 [void]$queueList.Items.Add($folder)
                 $queueList.SelectedIndex=$queueList.Items.Count-1
             }
-            # Spara direkt. Annars läser uppdateringstimern tillbaka den gamla
-            # kön från settings.json och den nyligen tillagda mappen försvinner.
+            # Save immediately. Otherwise the refresh timer reads the old
+            # queue from settings.json and the newly added folder disappears.
             Save-VisibleWorkList
         }
     }
@@ -2681,14 +3114,14 @@ function Refresh-QueueFromDisk {
     if(($disk -join "`n") -ne ($current -join "`n")){$queueList.Items.Clear();foreach($item in $disk){if($item){[void]$queueList.Items.Add([string]$item)}};Update-Dashboard}
 }
 function Set-RunState {
-    param([bool]$Running)
+    param([bool]$Running,[switch]$SkipEncoderGateRefresh)
     $script:QueueRunActive=$Running
-    if($Running){$bStart.Text=T 'StopQueue' 'Stop queue';$bStart.BackColor=[Drawing.Color]::FromArgb(185,45,45);$bStart.Enabled=$true;if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$false}}else{$bStart.Text=T 'StartQueue' 'Start entire queue';$bStart.BackColor=[Drawing.Color]::FromArgb(23,112,77);if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$true};Update-EncoderStartGate}
+    if($Running){$bStart.Text=T 'StopQueue' 'Stop queue';$bStart.BackColor=[Drawing.Color]::FromArgb(185,45,45);$bStart.Enabled=$true;if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$false}}else{$bStart.Text=T 'StartQueue' 'Start entire queue';$bStart.BackColor=[Drawing.Color]::FromArgb(23,112,77);if($null-ne$bEncoderCheckFooter){$bEncoderCheckFooter.Enabled=$true};if(-not$SkipEncoderGateRefresh){Update-EncoderStartGate}}
     $bOrganize.Enabled = -not $Running
     Update-Dashboard
 }
 function Stop-Queue {
-    $answer=[Windows.Forms.MessageBox]::Show((T 'ConfirmStop' 'Stop the running queue?'),(T 'StopQueue' 'Stop queue'),[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning);if($answer -ne [Windows.Forms.DialogResult]::Yes){return}
+    $answer=[Windows.Forms.MessageBox]::Show((T 'ConfirmStop' 'Stop the running queue? The active ffmpeg/MediaPrep process will be terminated.'),(T 'StopQueue' 'Stop queue'),[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning);if($answer -ne [Windows.Forms.DialogResult]::Yes){return}
     New-Item -Path $script:StopRequest -ItemType File -Force|Out-Null
     if($script:QueueProcess -and -not $script:QueueProcess.HasExited){Start-Process taskkill.exe -ArgumentList "/PID $($script:QueueProcess.Id) /T /F" -WindowStyle Hidden -Wait}
     Pause-StatisticsRun -Status 'Interrupted'
@@ -2696,37 +3129,92 @@ function Stop-Queue {
 }
 function Show-QueueDashboard {
     if(-not(Test-Path -LiteralPath $script:QueueDashboard -PathType Leaf)){
-        $msg='MediaPrep-Queue-Dashboard.ps1 saknas: ' + $script:QueueDashboard
+        $msg=T 'QueueDashboardMissing' 'Queue dashboard script is missing: {0}.' @($script:QueueDashboard)
         $status.Text=$msg;$status.ForeColor=[Drawing.Color]::FromArgb(170,40,35)
         [Windows.Forms.MessageBox]::Show($msg,'MediaPrep')|Out-Null
         return $false
     }
     try{
-        # Passa argumenten som en enda korrekt citerad sträng. Detta är stabilare i
-        # Windows PowerShell 5.1 när både Root och skriptsökvägen innehåller blanksteg.
+        # Pass the arguments as one correctly quoted string. This is more reliable in
+        # Windows PowerShell 5.1 when Root and the script path contain spaces.
         $dashboardArgs='-NoProfile -STA -ExecutionPolicy Bypass -File "{0}" -Root "{1}"' -f $script:QueueDashboard,$script:Root
         if([bool]$script:Settings.VerboseLogging){$dashboardArgs += ' -VerboseLogging'}
         if([bool]$script:Settings.VerboseLogging){
             try{Add-Content -LiteralPath (Join-Path $script:Prefs.LogFolder 'MediaPrep-Queue-Dashboard-Launcher.log') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')+' [INFO] '+$dashboardArgs) -Encoding UTF8}catch{}
         }
         $proc=Start-Process -FilePath 'powershell.exe' -ArgumentList $dashboardArgs -WorkingDirectory $script:Root -PassThru -ErrorAction Stop
-        if($null -eq $proc){throw 'Kunde inte starta statistikprocessen.'}
-        $status.Text=('Köstatistik öppnad (PID {0}).' -f $proc.Id)
+        if($null -eq $proc){throw 'The queue statistics process could not be started.'}
+        $script:QueueDashboardProcess=$proc
+        $status.Text=T 'QueueDashboardOpened' 'Queue statistics opened (PID {0}).' @($proc.Id)
         $status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
         return $true
     }catch{
-        $msg='Kunde inte öppna köstatistik: ' + $_.Exception.Message
+        $msg=T 'QueueDashboardOpenFailed' 'Could not open queue statistics: {0}' @($_.Exception.Message)
         if([bool]$script:Settings.VerboseLogging){try{Add-Content -LiteralPath (Join-Path $script:Prefs.LogFolder 'MediaPrep-Queue-Dashboard-Launcher.log') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')+' [ERROR] '+$msg) -Encoding UTF8}catch{}}
         $status.Text=$msg;$status.ForeColor=[Drawing.Color]::FromArgb(170,40,35)
-        [Windows.Forms.MessageBox]::Show($msg,'MediaPrep statistik')|Out-Null
+        [Windows.Forms.MessageBox]::Show($msg,(T 'QueueStatistics' 'Queue statistics'))|Out-Null
         return $false
     }
+}
+
+
+function Hide-QueueDetailWindow {
+    try{
+        $statePath=Join-Path $script:Prefs.DataFolder 'queue-console-window.json'
+        if(-not(Test-Path -LiteralPath $statePath -PathType Leaf)){return}
+        $state=Read-Json -Path $statePath -Default $null
+        if($null-eq$state){return}
+        $handleValue=P $state 'Handle' 0
+        if($null-eq$handleValue){return}
+        $hWnd=[IntPtr]([int64]$handleValue)
+        if($hWnd -ne [IntPtr]::Zero){[void][MediaPrep.ConsoleWindow]::ShowWindow($hWnd,0)}
+    }catch{}
+}
+function Stop-QueueDashboardForUserExit {
+    param([switch]$IncludeOrphaned)
+    # A deliberate Start Center close owns the UI cleanup. The queue process itself
+    # remains independent and is never terminated here.
+    Hide-QueueDetailWindow
+    $targets=@{}
+    $proc=$script:QueueDashboardProcess
+    if($null-ne$proc){
+        try{if(-not$proc.HasExited){$targets[[int]$proc.Id]=$proc}}catch{}
+    }
+    if($IncludeOrphaned){
+        try{
+            $rootText=[string]$script:Root
+            foreach($row in @(Get-CimInstance Win32_Process -OperationTimeoutSec 3 -ErrorAction Stop | Select-Object ProcessId,Name,CommandLine)){
+                if([int]$row.ProcessId -eq [int]$PID){continue}
+                if([string]$row.Name -notmatch '^(powershell|pwsh)\.exe$'){continue}
+                $cmd=[string]$row.CommandLine
+                if($cmd.IndexOf($rootText,[StringComparison]::OrdinalIgnoreCase)-lt0){continue}
+                if($cmd -notmatch 'MediaPrep-Queue-Dashboard\.ps1'){continue}
+                $found=Get-Process -Id ([int]$row.ProcessId) -ErrorAction SilentlyContinue
+                if($null-ne$found){$targets[[int]$row.ProcessId]=$found}
+            }
+        }catch{}
+    }
+    foreach($dashboardPid in @($targets.Keys)){
+        $target=$targets[$dashboardPid]
+        try{
+            if($target.HasExited){continue}
+            if([bool]$script:Settings.VerboseLogging){
+                try{Add-Content -LiteralPath (Join-Path $script:Prefs.LogFolder 'MediaPrep-Queue-Dashboard-Launcher.log') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')+' [INFO] Start Center requested dashboard close. PID='+$dashboardPid) -Encoding UTF8}catch{}
+            }
+            $closeRequested=$false
+            try{$closeRequested=[bool]$target.CloseMainWindow()}catch{}
+            if($closeRequested){try{[void]$target.WaitForExit(1500)}catch{}}
+            try{if(-not$target.HasExited){Stop-Process -Id $dashboardPid -Force -ErrorAction SilentlyContinue}}catch{}
+        }catch{}
+        finally{try{$target.Dispose()}catch{}}
+    }
+    $script:QueueDashboardProcess=$null
 }
 
 function Start-Queue {
     $runRequestedAt=Get-Date
     if($cUpdates.Checked -and -not $script:IsAdministrator){
-        [Windows.Forms.MessageBox]::Show((T 'NeedElevationForUpdates' 'Windows Update-omstartsskydd är valt men MediaPrep körs inte som administratör. Spara valet när ingen kö körs så startas MediaPrep om med UAC.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'NeedElevationForUpdates' 'Windows Update restart protection is selected but MediaPrep is not running as administrator. Save the option while no queue is running to restart MediaPrep through UAC.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
         return
     }
     $selectedFormats=@(Get-SelectedVideoFormatsFromUi)
@@ -2746,7 +3234,7 @@ function Start-Queue {
         $toolText=($missingNames -join "`r`n - ")
         $message=T 'MissingToolsDetailed' 'MediaPrep is missing required external tools:`r`n`r`n - {0}`r`n`r`nOpen the Settings tab. Under External tools you can download the tools or select the folder where they are already installed.' @($toolText)
         $tabs.SelectedTab=$tabPrefs
-        [Windows.Forms.MessageBox]::Show($message,(T 'WindowTitle' 'MediaPrep MKV Toolkit'),[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
+        [Windows.Forms.MessageBox]::Show($message,(T 'WindowTitle' 'MediaPrep MKV Toolkit Start Center'),[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null
         return
     }
     if(-not(Test-EncoderReadyForQueue)){return}
@@ -2763,12 +3251,12 @@ function Start-Queue {
         $status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
         Build-QueueStatisticsInventory;Update-QueueStatistics -Force
     }else{
-        if(@($job.LocalFileQueue).Count -eq 0){throw(T 'NeedFilesSelectedFormats' 'Load at least one file matching the selected file formats.')}
+        if(@($job.LocalFileQueue).Count -eq 0){throw(T 'NeedFilesSelectedFormats' 'No files matching the selected file formats were found.')}
         if(-not(Test-Path -LiteralPath $job.TemporarySourceFolder -PathType Container)){throw(T 'TemporarySource' 'Temporary source folder')}
         if(-not(Test-Path -LiteralPath $job.TemporaryOutputFolder -PathType Container)){New-Item -Path $job.TemporaryOutputFolder -ItemType Directory -Force|Out-Null}
         $includePath=Join-Path $script:Prefs.DataFolder 'all-in-one-files.json';Write-Json $includePath @($job.LocalFileQueue);$job|Add-Member IncludeListPath $includePath -Force
     }
-    if($job.ShutdownAfterSuccess){$answer=[Windows.Forms.MessageBox]::Show((T 'ConfirmShutdown' 'The computer will shut down. Continue?'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning);if($answer -ne [Windows.Forms.DialogResult]::Yes){return}}
+    if($job.ShutdownAfterSuccess){$answer=[Windows.Forms.MessageBox]::Show((T 'ConfirmShutdown' 'The computer will shut down after the entire queue completes without errors. Continue?'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning);if($answer -ne [Windows.Forms.DialogResult]::Yes){return}}
     Start-StatisticsRun -QueueRoots $(if($job.WorkMode -eq 'Queue'){@($job.UncQueue)}else{@('Local / All in one')}) -RunStart $runRequestedAt
     Remove-Item $script:StopRequest -Force -ErrorAction SilentlyContinue;$job|Add-Member StopRequestFile $script:StopRequest -Force
     $stamp=Get-Date -Format 'yyyy-MM-dd_HH-mm-ss';$queueLog=Join-Path $script:Prefs.LogFolder ("MediaPrep-Queue_{0}.log" -f $stamp);$job|Add-Member QueueLogPath $queueLog -Force
@@ -2824,7 +3312,7 @@ $bSaveOptions.Add_Click({
         $newPrevent=[bool]$cUpdates.Checked
         if($script:QueueRunActive -and ($oldPrevent -ne $newPrevent)){
             $cUpdates.Checked=$oldPrevent
-            [Windows.Forms.MessageBox]::Show((T 'CannotChangeUpdateProtectionWhileRunning' 'Inställningen för Windows Update-omstartsskydd kan inte ändras medan en kö körs. Ändra och spara valet när kön har stoppats eller avslutats.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+            [Windows.Forms.MessageBox]::Show((T 'CannotChangeUpdateProtectionWhileRunning' 'Windows Update restart protection cannot be changed while a queue is running. Change and save this option after the queue has stopped or completed.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
             return
         }
         Save-VisibleWorkList
@@ -2865,7 +3353,9 @@ $prefPanel.Add_Resize({
 
 $bSavePrefs.Add_Click({
     try{
+        $oldFFmpegPath=[string]$script:Prefs.FFmpegPath;$oldFFprobePath=[string]$script:Prefs.FFprobePath;$oldMkvmergePath=[string]$script:Prefs.MkvmergePath
         foreach($key in $script:PrefBoxes.Keys){$script:Prefs.$key=$script:PrefBoxes[$key].Text.Trim()}
+        if($oldFFmpegPath-ne[string]$script:Prefs.FFmpegPath -or $oldFFprobePath-ne[string]$script:Prefs.FFprobePath -or $oldMkvmergePath-ne[string]$script:Prefs.MkvmergePath){Clear-EncoderSessionSignature}
         $oldLanguage=[string]$script:Prefs.Language;$oldTheme=[string]$script:Prefs.Theme;$oldCustomBanner=[string]$script:Prefs.CustomThemeBanner;$oldCustomPanel=[string]$script:Prefs.CustomThemePanel;$oldCustomBackground=[string]$script:Prefs.CustomThemeBackground
         if($langCombo.SelectedItem){$script:Prefs.Language=[string]$langCombo.SelectedItem.Code}
         if($themeCombo.SelectedItem){$script:Prefs.Theme=[string]$themeCombo.SelectedItem.Code}
@@ -2874,41 +3364,71 @@ $bSavePrefs.Add_Click({
         $themeColorsChanged=($oldCustomBanner-ne[string]$script:Prefs.CustomThemeBanner -or $oldCustomPanel-ne[string]$script:Prefs.CustomThemePanel -or $oldCustomBackground-ne[string]$script:Prefs.CustomThemeBackground)
         $restartNeeded=($oldLanguage-ne[string]$script:Prefs.Language -or $oldTheme-ne[string]$script:Prefs.Theme -or ([string]$script:Prefs.Theme-eq'Custom' -and $themeColorsChanged))
         if($restartNeeded){
-            if($script:QueueRunActive){$status.Text=T 'ThemeSavedRestartLater' 'Inställningen är sparad. Tema/språk används efter nästa omstart eftersom kön körs.';$status.ForeColor=[Drawing.Color]::FromArgb(155,90,20);return}
+            if($script:QueueRunActive){$status.Text=T 'ThemeSavedRestartLater' 'The setting was saved. Theme/language will apply after the next restart because the queue is running.';$status.ForeColor=[Drawing.Color]::FromArgb(155,90,20);return}
             Save-VisibleWorkList
-            $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName='powershell.exe';$startInfo.Arguments='-NoProfile -ExecutionPolicy Bypass -STA -File "'+(Join-Path $script:AppFolder 'MediaPrep-Start.ps1')+'"';$startInfo.WorkingDirectory=$script:Root;$startInfo.UseShellExecute=$true;[Diagnostics.Process]::Start($startInfo)|Out-Null;$form.Close();return
+            $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName='powershell.exe';$startInfo.Arguments='-NoProfile -ExecutionPolicy Bypass -STA -File "'+(Join-Path $script:AppFolder 'MediaPrep-Start.ps1')+'"';$startInfo.WorkingDirectory=$script:Root;$startInfo.UseShellExecute=$true;[Diagnostics.Process]::Start($startInfo)|Out-Null;$script:SuppressDashboardShutdownOnClose=$true;$form.Close();return
         }
-        $status.Text=T 'PreferencesSaved' 'Preferences were saved.';$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
+        $status.Text=T 'PreferencesSaved' 'Preferences were saved. The interface language is being reloaded.';$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
     }catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep')|Out-Null}
 })
-$bStart.Add_Click({try{if($script:QueueRunActive){Stop-Queue}else{if(-not(Test-EncoderReadyForQueue)){Update-EncoderStartGate;return};Start-Queue}}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null}})
+$bStart.Add_Click({try{if($script:QueueRunActive){Stop-Queue}else{Start-Queue}}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null}})
 $bClose.Add_Click({$form.Close()})
 $rQueue.Add_CheckedChanged({if($rQueue.Checked){Refresh-WorkMode}});$rAll.Add_CheckedChanged({if($rAll.Checked){Refresh-WorkMode}})
 foreach($control in @($rFull,$rAnalyze,$rEncode,$cMux,$cEncode,$cForce,$cReanalyze,$cRebuild,$cCloseConsole,$cDelete,$cShutdown,$cSleep,$cUpdates,$cVerbose,$cIgnoreDecodeErrors,$cProcessErrorQueue)){$control.Add_CheckedChanged({Update-Dashboard})}
 $cUpdates.Enabled=$true
 
-$form.Add_Shown({$queueStatsPanel.Visible=$true;$queueStatsPanel.BringToFront();Set-QueueStatisticsDisplay;Update-QueueStatistics -Force;Show-MediaPrepUpdateResult})
-$timer=New-Object Windows.Forms.Timer;$timer.Interval=1500;$timer.Add_Tick({Refresh-BannerRuntimeInfo;Refresh-QueueFromDisk;Update-QueueStatistics;if($script:QueueRunActive -and $script:QueueProcess){try{if($script:QueueProcess.HasExited){$exitCode=$script:QueueProcess.ExitCode;$script:QueueProcess.Dispose();$script:QueueProcess=$null;Pause-StatisticsRun -Status 'Idle';Set-RunState $false;Refresh-QueueFromDisk;if($exitCode -eq 0){$status.Text=T 'QueueComplete' 'Queue completed successfully.';$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)}elseif($exitCode -eq 2){$status.Text=T 'QueueStopped' 'Queue was stopped.';$status.ForeColor=[Drawing.Color]::FromArgb(155,90,20)}else{$status.Text=T 'QueueFailed' 'Queue ended with exit code {0}.' @($exitCode);$status.ForeColor=[Drawing.Color]::FromArgb(170,40,35)}}}catch{}}});$timer.Start();$form.Add_FormClosed({$timer.Stop();$timer.Dispose();Finalize-StatisticsSession})
+$form.Add_Shown({
+    $queueStatsPanel.Visible=$true;$queueStatsPanel.BringToFront();Set-QueueStatisticsDisplay;Update-QueueStatistics -Force
+    Write-StartupTrace 'StartCenterShown'
+    $script:StartupTimingActive=$false
+    if(-not[string]::IsNullOrWhiteSpace([string]$script:SplashSignalPath)){
+        $script:SplashStopTimer=New-Object Windows.Forms.Timer
+        $script:SplashStopTimer.Interval=1000
+        $script:SplashStopTimer.Add_Tick({
+            try{$script:SplashStopTimer.Stop();$script:SplashStopTimer.Dispose()}catch{}
+            $script:SplashStopTimer=$null
+            Stop-MediaPrepSplash
+            Write-StartupTrace 'SplashStopSignaled' '1 second after Start Center Shown'
+            Show-MediaPrepUpdateResult
+        })
+        $script:SplashStopTimer.Start()
+    }else{Show-MediaPrepUpdateResult}
+})
+$timer=New-Object Windows.Forms.Timer;$timer.Interval=1500;$timer.Add_Tick({Refresh-BannerRuntimeInfo;Refresh-QueueFromDisk;Update-QueueStatistics;if($script:QueueRunActive -and $script:QueueProcess){try{if($script:QueueProcess.HasExited){$exitCode=$script:QueueProcess.ExitCode;$script:QueueProcess.Dispose();$script:QueueProcess=$null;Pause-StatisticsRun -Status 'Idle';Set-RunState $false;Refresh-QueueFromDisk;if($exitCode -eq 0){$status.Text=T 'QueueComplete' 'Queue completed successfully.';$status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)}elseif($exitCode -eq 2){$status.Text=T 'QueueStopped' 'Queue was stopped by the user.';$status.ForeColor=[Drawing.Color]::FromArgb(155,90,20)}else{$status.Text=T 'QueueFailed' 'Queue ended with exit code {0}. Check the queue log.' @($exitCode);$status.ForeColor=[Drawing.Color]::FromArgb(170,40,35)}}}catch{}}});$timer.Start();$form.Add_FormClosing({param($sender,$e);if($e.CloseReason -eq [Windows.Forms.CloseReason]::UserClosing -and -not$script:SuppressDashboardShutdownOnClose){Stop-QueueDashboardForUserExit}});$form.Add_FormClosed({$timer.Stop();$timer.Dispose();try{if($script:SplashStopTimer){$script:SplashStopTimer.Stop();$script:SplashStopTimer.Dispose()}}catch{};Stop-MediaPrepSplash;Write-StartupTrace 'FormClosed';Finalize-StatisticsSession})
 
-Apply-Settings $script:Settings
-Apply-ControlTheme $form
+Start-StartupTiming 'ApplySettings'
+try{Apply-Settings $script:Settings}finally{Stop-StartupTiming 'ApplySettings'}
+Start-StartupTiming 'ApplyControlTheme'
+try{Apply-ControlTheme $form}finally{Stop-StartupTiming 'ApplyControlTheme'}
 # Restore status colors that are semantic rather than theme colors.
-Update-PathAndProgramStatus
-Update-AllCustomThemeSwatches
-Refresh-EncoderTab
-# Säkerställ att CPU/GPU-kontrollerna ligger över temade paneler.
-$encoderCheckButton.Visible=$true;$encoderCheckButton.BringToFront();$encoderRefreshButton.Visible=$true;$encoderRefreshButton.BringToFront();$encoderDetailGroup.Visible=$true;$encoderDetailGroup.BringToFront()
+Start-StartupTiming 'UpdatePathAndProgramStatus'
+try{Update-PathAndProgramStatus}finally{Stop-StartupTiming 'UpdatePathAndProgramStatus'}
+Start-StartupTiming 'UpdateCustomThemeSwatches'
+try{Update-AllCustomThemeSwatches}finally{Stop-StartupTiming 'UpdateCustomThemeSwatches'}
+Start-StartupTiming 'RefreshEncoderTab'
+try{Refresh-EncoderTab}finally{Stop-StartupTiming 'RefreshEncoderTab'}
+# Ensure that the CPU/GPU controls stay above themed panels. The proven 0.11.51 layout is unchanged.
+Start-StartupTiming 'RestoreEncoderControlZOrder'
+try{$encoderCheckButton.Visible=$true;$encoderCheckButton.BringToFront();$encoderRefreshButton.Visible=$true;$encoderRefreshButton.BringToFront();$encoderDetailGroup.Visible=$true;$encoderDetailGroup.BringToFront()}finally{Stop-StartupTiming 'RestoreEncoderControlZOrder'}
 # Restore the banner after recursive theming.
-$header.BackColor=$script:ThemePalette.Banner;$title.ForeColor=$script:ThemePalette.BannerText;$subtitle.ForeColor=$script:ThemePalette.BannerText;$processLabel.ForeColor=$script:ThemePalette.BannerText;$version.ForeColor=$script:ThemePalette.BannerText;$toolVersionLabel.ForeColor=$script:ThemePalette.BannerText;$author.ForeColor=$script:ThemePalette.BannerText
-Update-EncoderBanner
-Refresh-BannerRuntimeInfo -RefreshTools
+Start-StartupTiming 'RestoreBannerTheme'
+try{$header.BackColor=$script:ThemePalette.Banner;$title.ForeColor=$script:ThemePalette.BannerText;$subtitle.ForeColor=$script:ThemePalette.BannerText;$processLabel.ForeColor=$script:ThemePalette.BannerText;$version.ForeColor=$script:ThemePalette.BannerText;$toolVersionLabel.ForeColor=$script:ThemePalette.BannerText;$author.ForeColor=$script:ThemePalette.BannerText}finally{Stop-StartupTiming 'RestoreBannerTheme'}
+Start-StartupTiming 'RefreshBannerRuntimeInfo'
+try{Refresh-BannerRuntimeInfo -RefreshTools}finally{Stop-StartupTiming 'RefreshBannerRuntimeInfo'}
 $bStart.BackColor=[Drawing.Color]::FromArgb(23,112,77);$bStart.ForeColor=[Drawing.Color]::White
-Register-ChoiceTextState @($rQueue,$rAll,$rFull,$rAnalyze,$rEncode,$cMux,$cEncode,$cForce,$cReanalyze,$cRebuild,$cIgnoreDecodeErrors,$cProcessErrorQueue,$cCloseConsole,$cSleep,$cShutdown,$cUpdates,$cVerbose,$cDelete,$cFormatTs,$cFormatMp4,$cFormatAvi,$cFormatMpg,$cFormatMpeg,$cFormatMkv)
-Refresh-WorkMode
+Start-StartupTiming 'RegisterChoiceTextState'
+try{Register-ChoiceTextState @($rQueue,$rAll,$rFull,$rAnalyze,$rEncode,$cMux,$cEncode,$cForce,$cReanalyze,$cRebuild,$cIgnoreDecodeErrors,$cProcessErrorQueue,$cCloseConsole,$cSleep,$cShutdown,$cUpdates,$cVerbose,$cDelete,$cFormatTs,$cFormatMp4,$cFormatAvi,$cFormatMpg,$cFormatMpeg,$cFormatMkv)}finally{Stop-StartupTiming 'RegisterChoiceTextState'}
+Start-StartupTiming 'RefreshWorkMode'
+try{Refresh-WorkMode}finally{Stop-StartupTiming 'RefreshWorkMode'}
 # Synchronize package version metadata while preserving all user preferences.
-Write-Json $script:PreferencesPath $script:Prefs;Apply-Prefs-ToConfig
-Set-RunState $false
-$status.Text=if($script:IsAdministrator){T 'AdminAvailable' 'Start Center is running as administrator.'}else{T 'AdminUnavailable' 'Start Center is not elevated.'}
+Start-StartupTiming 'WritePreferences'
+try{Write-Json $script:PreferencesPath $script:Prefs}finally{Stop-StartupTiming 'WritePreferences'}
+Start-StartupTiming 'ApplyPrefsToConfig'
+try{Apply-Prefs-ToConfig}finally{Stop-StartupTiming 'ApplyPrefsToConfig'}
+Start-StartupTiming 'SetRunState'
+try{Set-RunState $false -SkipEncoderGateRefresh}finally{Stop-StartupTiming 'SetRunState'}
+$status.Text=if($script:IsAdministrator){T 'AdminAvailable' 'Start Center is running as administrator. All protection options are available.'}else{T 'AdminUnavailable' 'Start Center is not elevated. Windows Update restart protection is disabled.'}
 $status.ForeColor=if($script:IsAdministrator){[Drawing.Color]::FromArgb(23,112,77)}else{[Drawing.Color]::FromArgb(155,90,20)}
 $form.AcceptButton=$bStart;$form.CancelButton=$bClose
+Write-StartupTrace 'BeforeShowDialog'
 [void]$form.ShowDialog()

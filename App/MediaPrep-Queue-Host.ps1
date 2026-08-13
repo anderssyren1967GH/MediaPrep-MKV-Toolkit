@@ -74,17 +74,17 @@ try {
 
     Start-Transcript -LiteralPath $LogFile -Force | Out-Null
     $transcriptStarted = $true
-    Write-Diagnostic 'MediaPrep Queue Host startade.'
+    Write-Diagnostic 'MediaPrep Queue Host started.'
     Write-Diagnostic ("PowerShell: {0}" -f $PSVersionTable.PSVersion)
     Write-Diagnostic ("64-bit process: {0}" -f [Environment]::Is64BitProcess)
-    Write-Diagnostic ("Administratör: {0}" -f (Test-IsAdministrator))
-    Write-Diagnostic ("Arbetsmapp: {0}" -f $root)
-    Write-Diagnostic ("Jobbfil: {0}" -f $JobFile)
-    Write-Diagnostic ("Köskript: {0}" -f $queueScript)
-    Write-Diagnostic ("Loggfil: {0}" -f $LogFile)
+    Write-Diagnostic ("Administrator: {0}" -f (Test-IsAdministrator))
+    Write-Diagnostic ("Working folder: {0}" -f $root)
+    Write-Diagnostic ("Job file: {0}" -f $JobFile)
+    Write-Diagnostic ("Queue script: {0}" -f $queueScript)
+    Write-Diagnostic ("Log file: {0}" -f $LogFile)
 
     if (-not (Test-Path -LiteralPath $JobFile -PathType Leaf)) {
-        throw "Jobbfilen hittades inte: $JobFile"
+        throw "Job file was not found: $JobFile"
     }
 
     $job = Get-Content -LiteralPath $JobFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -94,59 +94,59 @@ try {
     }
 
     if ($verboseLogging) {
-        Write-Diagnostic 'Verbose loggning är aktiverad.'
-        Write-Diagnostic ("Kommandorad: {0}" -f [Environment]::CommandLine)
-        Write-Diagnostic ("Användare: {0}\\{1}" -f $env:USERDOMAIN, $env:USERNAME)
-        Write-Diagnostic ("Dator: {0}" -f $env:COMPUTERNAME)
-        Write-Diagnostic 'Jobbinnehåll följer:'
+        Write-Diagnostic 'Verbose logging is enabled.'
+        Write-Diagnostic ("Command line: {0}" -f [Environment]::CommandLine)
+        Write-Diagnostic ("User: {0}\\{1}" -f $env:USERDOMAIN, $env:USERNAME)
+        Write-Diagnostic ("Computer: {0}" -f $env:COMPUTERNAME)
+        Write-Diagnostic 'Job content follows:'
         Write-Host ($job | ConvertTo-Json -Depth 10)
     }
 
     if (-not (Test-Path -LiteralPath $queueScript -PathType Leaf)) {
-        throw "Köskriptet hittades inte: $queueScript"
+        throw "Queue script was not found: $queueScript"
     }
 
-    Write-Diagnostic 'Läser in och startar MediaPrep-Queue.ps1.'
+    Write-Diagnostic 'Loading and starting MediaPrep-Queue.ps1.'
     $queueResult = & $queueScript -JobFile $JobFile
 
     if ($null -eq $queueResult) {
-        throw 'Köskriptet returnerade ingen statuskod.'
+        throw 'Queue script returned no status code.'
     }
 
     $resultValues = @($queueResult)
     $lastResult = $resultValues[$resultValues.Count - 1]
     $parsedExitCode = 0
     if (-not [int]::TryParse([string]$lastResult,[ref]$parsedExitCode)) {
-        throw ("Köskriptet returnerade en ogiltig statuskod: {0}" -f $lastResult)
+        throw ("Queue script returned an invalid status code: {0}" -f $lastResult)
     }
 
     $exitCode = $parsedExitCode
-    Write-Diagnostic ("Köskriptet avslutades med exitkod {0}." -f $exitCode)
+    Write-Diagnostic ("Queue script ended with exit code {0}." -f $exitCode)
     if ($verboseLogging) {
-        Write-Diagnostic 'Verbose-pausen hanteras av köskriptet innan det returnerar.'
+        Write-Diagnostic 'The verbose pause is handled by the queue script before it returns.'
     }
 }
 catch {
     $exitCode = 1
     Write-Host ''
-    Write-Host '================ DETALJERAT STARTFEL ================' -ForegroundColor Red
-    Write-Host ("Meddelande       : {0}" -f $_.Exception.Message) -ForegroundColor Red
-    Write-Host ("Feltyp           : {0}" -f $_.Exception.GetType().FullName) -ForegroundColor Red
-    Write-Host ("Kategori         : {0}" -f $_.CategoryInfo) -ForegroundColor Red
+    Write-Host '================ DETAILED STARTUP ERROR ================' -ForegroundColor Red
+    Write-Host ("Message          : {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Error type       : {0}" -f $_.Exception.GetType().FullName) -ForegroundColor Red
+    Write-Host ("Category         : {0}" -f $_.CategoryInfo) -ForegroundColor Red
     Write-Host ("FullyQualifiedId : {0}" -f $_.FullyQualifiedErrorId) -ForegroundColor Red
     if ($_.InvocationInfo) {
-        Write-Host ("Skript           : {0}" -f $_.InvocationInfo.ScriptName) -ForegroundColor Red
-        Write-Host ("Rad              : {0}" -f $_.InvocationInfo.ScriptLineNumber) -ForegroundColor Red
+        Write-Host ("Script           : {0}" -f $_.InvocationInfo.ScriptName) -ForegroundColor Red
+        Write-Host ("Line             : {0}" -f $_.InvocationInfo.ScriptLineNumber) -ForegroundColor Red
         Write-Host ("Position         : {0}" -f $_.InvocationInfo.PositionMessage) -ForegroundColor Red
     }
     if ($_.ScriptStackTrace) {
         Write-Host ("Stack            : {0}" -f $_.ScriptStackTrace) -ForegroundColor Red
     }
     if ($_.Exception.InnerException) {
-        Write-Host ("Inre fel         : {0}" -f $_.Exception.InnerException.Message) -ForegroundColor Red
+        Write-Host ("Inner error      : {0}" -f $_.Exception.InnerException.Message) -ForegroundColor Red
     }
     Write-Host '======================================================' -ForegroundColor Red
-    Write-Host ("[INFO ] Diagnostik sparades i: {0}" -f $LogFile) -ForegroundColor Yellow
+    Write-Host ("[INFO ] Diagnostics saved to: {0}" -f $LogFile) -ForegroundColor Yellow
 
     $noPause = $false
     if ($null -ne $job) {
@@ -158,7 +158,7 @@ catch {
 
     if ($verboseLogging -or -not $noPause) {
         Write-Host ''
-        [void](Read-Host 'Tryck Enter för att stänga felsökningsfönstret')
+        [void](Read-Host 'Press Enter to close the diagnostics window')
     }
 }
 finally {

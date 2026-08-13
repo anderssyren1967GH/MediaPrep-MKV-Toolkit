@@ -125,7 +125,7 @@ function Invoke-NativeCapture {
         $psi.StandardErrorEncoding=[Text.Encoding]::UTF8
         $process=New-Object Diagnostics.Process
         $process.StartInfo=$psi
-        if (-not $process.Start()) { throw "Kunde inte starta: $FilePath" }
+        if (-not $process.Start()) { throw "Could not start: $FilePath" }
         $outTask=$process.StandardOutput.ReadToEndAsync()
         $errTask=$process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
@@ -254,7 +254,7 @@ function Invoke-EncodeBenchmark {
         $psi.StandardErrorEncoding=[Text.Encoding]::UTF8
         $process=New-Object Diagnostics.Process
         $process.StartInfo=$psi
-        if (-not $process.Start()) { throw 'FFmpeg benchmark kunde inte startas.' }
+        if (-not $process.Start()) { throw 'FFmpeg benchmark could not be started.' }
         $outTask=$process.StandardOutput.ReadToEndAsync()
         $errTask=$process.StandardError.ReadToEndAsync()
         while (-not $process.HasExited) {
@@ -338,15 +338,15 @@ function Test-NvencOption {
 }
 
 try {
-    Set-TestStatus -Stage 'Starting' -Current '' -Percent 0 -Message 'Identifierar hårdvara och FFmpeg.'
-    Write-Log INFO 'Encoderkontroll startad.'
+    Set-TestStatus -Stage 'Starting' -Current '' -Percent 0 -Message 'Detecting hardware and FFmpeg.'
+    Write-Log INFO 'Encoder verification started.'
 
     if ($BenchmarkSeconds -lt 5) { $BenchmarkSeconds=5 }
     if ($BenchmarkSeconds -gt 30) { $BenchmarkSeconds=30 }
 
     $preferences=Read-JsonFile $PreferencesPath
     $ffmpeg=Resolve-ToolPath (Get-P $preferences 'FFmpegPath' '') 'Tools\FFmpeg\ffmpeg.exe'
-    if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) { throw "ffmpeg.exe saknas: $ffmpeg" }
+    if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) { throw "ffmpeg.exe is missing: $ffmpeg" }
 
     $ffmpegVersion=Get-FirstLine -Exe $ffmpeg -Arguments @('-version')
     $encoderResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments @('-hide_banner','-encoders')
@@ -357,14 +357,14 @@ try {
 
     $source=Join-Path $TempFolder 'mediaprep-encoder-benchmark-source.mkv'
     Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
-    Set-TestStatus -Stage 'Preparing' -Current 'Benchmark source' -Percent 4 -Message 'Skapar en reproducerbar H.264-testsekvens i 1080p.'
+    Set-TestStatus -Stage 'Preparing' -Current 'Benchmark source' -Percent 4 -Message 'Creating a reproducible 1080p H.264 test sequence.'
     $sourceArgs=@('-hide_banner','-loglevel','error','-y','-f','lavfi','-i','testsrc2=size=1920x1080:rate=30','-f','lavfi','-i','sine=frequency=1000:sample_rate=48000','-t',[string]$BenchmarkSeconds,'-c:v','libx264','-preset','ultrafast','-crf','18','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k',$source)
     $sourceResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments $sourceArgs
     if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        Write-Log WARN 'libx264-testkälla kunde inte skapas; provar MPEG-4.'
+        Write-Log WARN 'The libx264 test source could not be created; trying MPEG-4.'
         $sourceResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments @('-hide_banner','-loglevel','error','-y','-f','lavfi','-i','testsrc2=size=1920x1080:rate=30','-t',[string]$BenchmarkSeconds,'-c:v','mpeg4','-q:v','2','-pix_fmt','yuv420p',$source)
     }
-    if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Kunde inte skapa benchmark-källfil med FFmpeg.' }
+    if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Could not create the benchmark source file with FFmpeg.' }
 
     $candidates=New-Object System.Collections.Generic.List[object]
     $candidates.Add([pscustomobject][ordered]@{
@@ -455,7 +455,7 @@ try {
                 $verified=$true
                 $ssim=Measure-SSIM -FFmpeg $ffmpeg -Source $source -Encoded $output
                 $benchmark | Add-Member -NotePropertyName SSIM -NotePropertyValue $ssim -Force
-                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+3) -Message 'Benchmark klar. Kontrollerar encoderfunktioner.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
+                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+3) -Message 'Benchmark complete. Checking encoder capabilities.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
 
                 switch ([string]$candidate.Backend) {
                     'NVENC' {
@@ -504,7 +504,7 @@ try {
                         $capabilities['TargetBitrate']=$true
                     }
                 }
-                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+11) -Message 'Encoderkontroll klar för denna enhet.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
+                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+11) -Message 'Encoder verification complete for this device.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
             }
             else {
                 $reason=[string]$benchmark.ErrorText
@@ -579,8 +579,8 @@ try {
     }
     Write-JsonAtomic -Path $BenchmarkPath -Value $benchmarkSummary -Depth 10
 
-    Set-TestStatus -Stage 'Completed' -Current '' -Percent 100 -Message ("Klart. {0} encoder(s) verifierade." -f $verifiedResults.Count)
-    Write-Log INFO ("Encoderkontroll klar. Verifierade: {0}/{1}." -f $verifiedResults.Count,$results.Count)
+    Set-TestStatus -Stage 'Completed' -Current '' -Percent 100 -Message ("Complete. {0} encoder(s) verified." -f $verifiedResults.Count)
+    Write-Log INFO ("Encoder verification complete. Verified: {0}/{1}." -f $verifiedResults.Count,$results.Count)
     exit 0
 }
 catch {

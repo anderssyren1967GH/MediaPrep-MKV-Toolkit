@@ -1,3 +1,21 @@
+﻿## 0.11.53 - 2026-08-13
+
+- Added an independent startup splash screen and permanent startup diagnostics. The basic startup log remains compact, while Verbose logging adds timestamped fine-grained startup stage timings for troubleshooting.
+- Reduced Start Center startup time by reusing verified CPU/GPU information from preferences and an in-memory encoder signature snapshot instead of repeatedly querying FFmpeg and Windows hardware during one startup session.
+- Queue start remains a safety boundary: a fresh encoder/FFmpeg/hardware validation is still performed before processing begins.
+- Preserves the user's last explicitly selected encoder across restarts and updates. CPU/libx265 is now only the first-run default when no saved encoder preference exists.
+- Full release packages no longer include live `Data\config.json` or `Data\mediaprep.preferences.json`, preventing manual full-ZIP overlays from overwriting existing user settings. Missing files are created automatically on first launch.
+- Added locale-based JSON language resources under `Languages\`, currently `mediaprep.en-US.json` and `mediaprep.sv-SE.json`, with dynamic discovery for future languages.
+- Added language-resource validation with `SchemaVersion = 1` and `LanguageFileVersion = 1.6.0`. `en-US` is the authoritative fallback for missing keys, incompatible resources, or invalid format placeholders.
+- Runtime console output, Queue Dashboard, unfinished-session recovery, and saved-queue dialogs now follow the selected language. The UI keeps three language modes: System default, English, and Svenska.
+- Fixed Queue Dashboard localization/statistics rendering, including loading older archived statistics that do not contain a root session status.
+- Queue Dashboard is closed only by deliberate Start Center UI cleanup or a deliberate MediaPrep update. An unexpected Start Center termination leaves Dashboard available so an independent running queue can still be monitored.
+- Added a two-stage update safety gate. Start Center blocks MediaPrep/external-tool version changes while a MediaPrep queue or media worker is active, and the separate updater repeats the worker check before changing program files.
+- Deliberate MediaPrep updates close Dashboard windows for the same installation before activation, while queue/media processes themselves are never terminated by dashboard cleanup.
+- Installer/updater paths make a best-effort attempt to remove Windows Internet-zone markers from verified/copied MediaPrep program files to reduce unnecessary publisher warnings after downloaded installs and updates.
+- Continued controlled source-language cleanup: internal diagnostics/comments in the queue and encoder-host paths are English while user-visible runtime text is localized through language resources.
+- The proven CPU/GPU layout and the existing muxing, encoding, UNC isolation, queue data format, statistics calculations, error queue, and rollback model are otherwise unchanged.
+
 ## 0.11.52 - 2026-08-12
 
 - Added MediaPrep self-update/version management through GitHub Releases. Up to five recent published MediaPrep versions can be listed and selected, including deliberate downgrade to an older published version.
