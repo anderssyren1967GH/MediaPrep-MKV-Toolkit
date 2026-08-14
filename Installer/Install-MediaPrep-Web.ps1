@@ -1,4 +1,6 @@
-﻿# MediaPrep MKV Toolkit - GitHub Web Installer
+﻿# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
+# MediaPrep MKV Toolkit - GitHub Web Installer
 # Windows PowerShell 5.1 compatible, including ConstrainedLanguage environments.
 # Non-interactive: suitable for PowerShell console, PowerShell ISE and future package managers.
 
@@ -7,10 +9,69 @@ param(
     [string]$Repository = 'anderssyren1967GH/MediaPrep-MKV-Toolkit',
     [string]$InstallPath = 'C:\MediaPrep MKV Toolkit',
     [switch]$KeepDownloadedFiles,
-    [switch]$Force
+    [switch]$Force,
+    [string]$Language = 'system'
 )
 
 $ErrorActionPreference = 'Stop'
+
+# The web installer has to bootstrap before the package is available locally.
+# After the latest release tag is known it loads the same JSON language resource
+# directly from that release. If this is unavailable, en-US fallback text is used.
+$script:WebLanguageBase=$null
+$script:WebLanguage=$null
+function Get-WebProperty([object]$Object,[string]$Name,$Default=$null){if($null-eq$Object){return $Default};$p=$Object.PSObject.Properties[$Name];if($null-eq$p){return $Default};return $p.Value}
+function T([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@()){
+    $bp=if($script:WebLanguageBase){$script:WebLanguageBase.PSObject.Properties[$Key]}else{$null}
+    $base=if($bp -and -not[string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p=if($script:WebLanguage){$script:WebLanguage.PSObject.Properties[$Key]}else{$null}
+    $value=if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $a=@($FormatArgs)
+    if($a.Count -gt 0){
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$a)}catch{}
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$a)}catch{return $Fallback}
+    }
+    return $value
+}
+function Normalize-WebLanguage([string]$Code){
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'}
+    $v=$Code.Trim()
+    switch($v.ToLowerInvariant()){
+        'system'{return 'system'}
+        'default'{return 'system'}
+        'en'{return 'en-US'}
+        'english'{return 'en-US'}
+        'en-us'{return 'en-US'}
+        'sv'{return 'sv-SE'}
+        'swedish'{return 'sv-SE'}
+        'svenska'{return 'sv-SE'}
+        'sv-se'{return 'sv-SE'}
+    }
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($v)).Name}catch{return $v}
+}
+function Get-WebLanguageDocument([string]$Url){try{return (Invoke-RestMethod -Uri $Url -UseBasicParsing -Headers @{'User-Agent'='MediaPrep-WebInstaller'})}catch{return $null}}
+function Initialize-WebLanguage([string]$Tag){
+    try{
+        $baseUrl='https://raw.githubusercontent.com/'+$Repository+'/'+$Tag+'/Languages/mediaprep.en-US.json'
+        $script:WebLanguageBase=Get-WebLanguageDocument $baseUrl
+        $requested=Normalize-WebLanguage $Language
+        if($requested-eq'system'){$requested=[Globalization.CultureInfo]::CurrentUICulture.Name}
+        if($requested-ieq'en-US'){$script:WebLanguage=$script:WebLanguageBase;return}
+        $selected=Get-WebLanguageDocument ('https://raw.githubusercontent.com/'+$Repository+'/'+$Tag+'/Languages/mediaprep.'+$requested+'.json')
+        if($null-eq$selected){
+            try{
+                $ui=[Globalization.CultureInfo]::GetCultureInfo($requested)
+                $contents=Invoke-RestMethod -Uri ('https://api.github.com/repos/'+$Repository+'/contents/Languages?ref='+$Tag) -UseBasicParsing -Headers @{'User-Agent'='MediaPrep-WebInstaller';Accept='application/vnd.github+json'}
+                foreach($entry in @($contents)){
+                    if([string]$entry.name -notmatch '^mediaprep\.(.+)\.json$'){continue}
+                    try{$candidateCulture=[Globalization.CultureInfo]::GetCultureInfo($Matches[1]);if($candidateCulture.TwoLetterISOLanguageName -ieq $ui.TwoLetterISOLanguageName){$selected=Get-WebLanguageDocument ([string]$entry.download_url);break}}catch{}
+                }
+            }catch{}
+        }
+        if($null-eq$selected){$selected=$script:WebLanguageBase}
+        $script:WebLanguage=$selected
+    }catch{$script:WebLanguage=$script:WebLanguageBase}
+}
 
 function Write-Step {
     param([string]$Message)
@@ -21,15 +82,10 @@ function Write-Step {
 function Stop-Installer {
     param([string]$Message)
     Write-Host ''
-    Write-Host 'MediaPrep web installation failed.' -ForegroundColor Red
+    Write-Host (T 'WebInstallerFailed' 'MediaPrep web installation failed.') -ForegroundColor Red
     Write-Host $Message -ForegroundColor Red
     exit 1
 }
-
-Write-Host ''
-Write-Host 'MediaPrep MKV Toolkit - GitHub Web Installer' -ForegroundColor Cyan
-Write-Host ('PowerShell language mode: ' + [string]$ExecutionContext.SessionState.LanguageMode)
-Write-Host ('Installation folder: ' + $InstallPath)
 
 $apiUrl = 'https://api.github.com/repos/' + $Repository + '/releases/latest'
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -40,7 +96,7 @@ $extractPath = Join-Path $tempRoot 'Extracted'
 
 try {
     if ([string]::IsNullOrWhiteSpace($InstallPath)) {
-        Stop-Installer 'InstallPath cannot be empty.'
+        Stop-Installer (T 'WebInstallerInstallPathEmpty' 'InstallPath cannot be empty.')
     }
 
     $InstallPath = $InstallPath -replace '^"(.*)"$','$1'
@@ -48,7 +104,7 @@ try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
 
-    Write-Step 'Checking the latest MediaPrep release on GitHub'
+    Write-Step (T 'WebInstallerCheckingLatest' 'Checking the latest MediaPrep release on GitHub')
 
     $headers = @{
         Accept = 'application/vnd.github+json'
@@ -56,15 +112,20 @@ try {
     }
 
     $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers -UseBasicParsing
-    if ($null -eq $release) { Stop-Installer 'GitHub did not return a release.' }
+    if ($null -eq $release) { Stop-Installer (T 'WebInstallerNoRelease' 'GitHub did not return a release.') }
 
     $tag = [string]$release.tag_name
-    if ([string]::IsNullOrWhiteSpace($tag)) { Stop-Installer 'GitHub did not return a valid release tag.' }
+    if ([string]::IsNullOrWhiteSpace($tag)) { Stop-Installer (T 'WebInstallerInvalidReleaseTag' 'GitHub did not return a valid release tag.') }
 
     $version = $tag
     if ($version -match '^[vV](.+)$') { $version = $Matches[1] }
 
-    Write-Host ('Latest release: ' + $tag)
+    Initialize-WebLanguage -Tag $tag
+    Write-Host ''
+    Write-Host (T 'WebInstallerTitle' 'MediaPrep MKV Toolkit - GitHub Web Installer') -ForegroundColor Cyan
+    Write-Host (T 'WebInstallerLanguageMode' 'PowerShell language mode: {0}' @([string]$ExecutionContext.SessionState.LanguageMode))
+    Write-Host (T 'WebInstallerInstallFolder' 'Installation folder: {0}' @($InstallPath))
+    Write-Host (T 'WebInstallerLatestRelease' 'Latest release: {0}' @($tag))
 
     $expectedName = 'MediaPrep-MKV-Toolkit-' + $version + '.zip'
     $asset = $null
@@ -88,54 +149,54 @@ try {
     }
 
     if ($null -eq $asset) {
-        Stop-Installer ('No packaged MediaPrep ZIP was found in release ' + $tag + '.')
+        Stop-Installer (T 'WebInstallerPackageMissing' 'No packaged MediaPrep ZIP was found in release {0}.' @($tag))
     }
 
-    Write-Step ('Downloading ' + [string]$asset.name)
+    Write-Step (T 'WebInstallerDownloading' 'Downloading {0}' @([string]$asset.name))
     Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -OutFile $zipPath -UseBasicParsing
 
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
-        Stop-Installer 'The release ZIP was not downloaded.'
+        Stop-Installer (T 'WebInstallerZipNotDownloaded' 'The release ZIP was not downloaded.')
     }
 
     $downloaded = Get-Item -LiteralPath $zipPath
     if ($downloaded.Length -le 0) {
-        Stop-Installer 'The downloaded release ZIP is empty.'
+        Stop-Installer (T 'WebInstallerZipEmpty' 'The downloaded release ZIP is empty.')
     }
 
-    Write-Host ('Downloaded bytes: ' + [string]$downloaded.Length)
+    Write-Host (T 'WebInstallerDownloadedBytes' 'Downloaded bytes: {0}' @([string]$downloaded.Length))
 
     $digestText = [string]$asset.digest
     if ($digestText -match '^sha256:([0-9a-fA-F]{64})$') {
-        Write-Step 'Verifying SHA-256'
+        Write-Step (T 'WebInstallerVerifyingSha' 'Verifying SHA-256')
         $expectedHash = $Matches[1]
         $actualHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
         if ($actualHash -ne $expectedHash) {
-            Stop-Installer ('SHA-256 verification failed. Expected: ' + $expectedHash + ' Actual: ' + $actualHash)
+            Stop-Installer (T 'WebInstallerShaFailed' 'SHA-256 verification failed. Expected: {0} Actual: {1}' @($expectedHash,$actualHash))
         }
-        Write-Host 'SHA-256: OK' -ForegroundColor Green
+        Write-Host (T 'WebInstallerShaOk' 'SHA-256: OK') -ForegroundColor Green
     }
 
     # After integrity verification, remove the Internet-zone marker before extraction when possible.
     try{Unblock-File -LiteralPath $zipPath -ErrorAction SilentlyContinue}catch{}
 
-    Write-Step 'Extracting release package'
+    Write-Step (T 'WebInstallerExtracting' 'Extracting release package')
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
     $launcher = Get-ChildItem -LiteralPath $extractPath -Filter 'Start MediaPrep.cmd' -File -Recurse |
         Select-Object -First 1
 
     if ($null -eq $launcher) {
-        Stop-Installer 'The downloaded package does not contain Start MediaPrep.cmd.'
+        Stop-Installer (T 'WebInstallerLauncherMissing' 'The downloaded package does not contain Start MediaPrep.cmd.')
     }
 
     $packageRoot = $launcher.Directory.FullName
 
     if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)) {
-        Stop-Installer 'The downloaded package does not contain App\MediaPrep-Start.ps1.'
+        Stop-Installer (T 'WebInstallerStartScriptMissing' 'The downloaded package does not contain App\MediaPrep-Start.ps1.')
     }
 
-    Write-Step ('Preparing installation folder: ' + $InstallPath)
+    Write-Step (T 'WebInstallerPreparingFolder' 'Preparing installation folder: {0}' @($InstallPath))
 
     if (-not (Test-Path -LiteralPath $InstallPath)) {
         New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
@@ -146,8 +207,7 @@ try {
 
         if ($null -ne $existing -and -not $Force) {
             Stop-Installer (
-                'The installation folder already contains files: ' + $InstallPath +
-                '. Re-run with -Force to update/overwrite program files without deleting unrelated files.'
+                (T 'WebInstallerFolderNotEmpty' 'The installation folder already contains files: {0}. Re-run with -Force to update/overwrite program files without deleting unrelated files.' @($InstallPath))
             )
         }
     }
@@ -159,12 +219,11 @@ try {
     }
     catch {
         Stop-Installer (
-            'The installation folder is not writable: ' + $InstallPath +
-            '. Choose another folder or run PowerShell as administrator.'
+            (T 'WebInstallerFolderNotWritable' 'The installation folder is not writable: {0}. Choose another folder or run PowerShell as administrator.' @($InstallPath))
         )
     }
 
-    Write-Step ('Installing MediaPrep ' + $version)
+    Write-Step (T 'WebInstallerInstalling' 'Installing MediaPrep {0}' @($version))
 
     $existingMediaPrep=Test-Path -LiteralPath (Join-Path $InstallPath 'App\MediaPrep-Start.ps1') -PathType Leaf
     if($existingMediaPrep -and $Force){
@@ -226,26 +285,26 @@ try {
     $installedStartCenter = Join-Path $InstallPath 'App\MediaPrep-Start.ps1'
 
     if (-not (Test-Path -LiteralPath $installedLauncher -PathType Leaf)) {
-        Stop-Installer 'Installation verification failed: Start MediaPrep.cmd is missing.'
+        Stop-Installer (T 'WebInstallerVerifyLauncherMissing' 'Installation verification failed: Start MediaPrep.cmd is missing.')
     }
 
     if (-not (Test-Path -LiteralPath $installedStartCenter -PathType Leaf)) {
-        Stop-Installer 'Installation verification failed: App\MediaPrep-Start.ps1 is missing.'
+        Stop-Installer (T 'WebInstallerVerifyStartMissing' 'Installation verification failed: App\MediaPrep-Start.ps1 is missing.')
     }
 
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Green
-    Write-Host ('MediaPrep MKV Toolkit ' + $version + ' installed successfully.') -ForegroundColor Green
-    Write-Host ('Installation folder: ' + $InstallPath) -ForegroundColor Green
+    Write-Host (T 'WebInstallerInstalled' 'MediaPrep MKV Toolkit {0} installed successfully.' @($version)) -ForegroundColor Green
+    Write-Host (T 'WebInstallerInstallFolder' 'Installation folder: {0}' @($InstallPath)) -ForegroundColor Green
     Write-Host '============================================================' -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Start MediaPrep with:' -ForegroundColor Cyan
+    Write-Host (T 'WebInstallerStartWith' 'Start MediaPrep with:') -ForegroundColor Cyan
     Write-Host ('"' + $installedLauncher + '"')
     Write-Host ''
-    Write-Host 'FFmpeg and MKVToolNix can be installed from MediaPrep Settings.'
+    Write-Host (T 'WebInstallerToolsHint' 'FFmpeg and MKVToolNix can be installed from MediaPrep Settings.')
 
     if([string]$ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') {
-        $clmWarning=@'
+        $clmWarning=T 'WebInstallerClmWarning' @'
 MediaPrep was installed successfully, but this computer enforces PowerShell ConstrainedLanguage.
 
 MediaPrep requires PowerShell FullLanguage for its graphical interface.
@@ -265,14 +324,14 @@ Do not troubleshoot FFmpeg, MKVToolNix, or graphics drivers until this PowerShel
 }
 catch {
     Write-Host ''
-    Write-Host 'MediaPrep web installation failed.' -ForegroundColor Red
+    Write-Host (T 'WebInstallerFailed' 'MediaPrep web installation failed.') -ForegroundColor Red
     Write-Host $_ -ForegroundColor Red
     exit 1
 }
 finally {
     if ($KeepDownloadedFiles) {
         Write-Host ''
-        Write-Host ('Downloaded files kept at: ' + $tempRoot)
+        Write-Host (T 'WebInstallerDownloadsKept' 'Downloaded files kept at: {0}' @($tempRoot))
     }
     else {
         if (Test-Path -LiteralPath $tempRoot) {

@@ -1,4 +1,127 @@
-﻿## 0.11.53 - 2026-08-13
+﻿# Changelog
+
+## 0.11.54 - 2026-08-14
+
+- Final release built directly from the validated 0.11.54 beta 12 checkpoint.
+- No functional mux, queue, encoder, classification, subtitle-language, Dashboard, or CPU/GPU layout changes were introduced for final packaging.
+- Ships 14 synchronized interface languages (schema 1, LanguageFileVersion 1.7.5, 739 keys) and the corrected language validator.
+- Includes GPL-3.0-or-later licensing for MediaPrep source code with separate third-party and encoder/codec licensing documentation.
+- Preserves restart-safe UNC processing, error-queue cleanup, All-in-one statistics, TV/Film/Other classification including episode-number sequences, and per-folder subtitle-language handling.
+- Post-publication release test: verify a real GitHub update from 0.11.53 to 0.11.54, including updater backup/install/automatic restart and preserved settings.
+
+## 0.11.54 beta 12 - 2026-08-14
+
+- Fixed a false-positive mojibake validation error for legitimate lowercase accented characters by changing the validator mojibake regex from case-insensitive `-match` to case-sensitive `-cmatch`.
+- Confirmed the French `QueueConsoleJobMissing` text is valid UTF-8 and does not require a translation change.
+- Language resources remain schema 1 / LanguageFileVersion 1.7.5 with 739 keys across all 14 languages; no locale JSON files were modified.
+- Processing, queue, Dashboard, encoding, classification, subtitle-language and CPU/GPU layout logic are unchanged from beta 11.
+
+## 0.11.54 beta 11 - 2026-08-14
+
+- Polished Dashboard localization after beta 10 multilingual testing.
+- Reapplies localized Dashboard tabs, captions, grid headers and buttons after form construction and when the saved language preference changes.
+- Localizes slow-copy direction values (`In` / `Out`).
+- LanguageFileVersion is now `1.7.5`; all 14 language files contain 739 keys in identical order with identical placeholders.
+- Muxing, queue processing, encoding, classification and CPU/GPU layout are unchanged.
+
+## 0.11.54 beta 10 - 2026-08-14
+
+- Froze `Languages\mediaprep.en-US.json` as the authoritative 0.11.54 localization master: schema 1, LanguageFileVersion 1.7.4, 737 keys.
+- Added twelve complete locale resources: German, French, Spanish, Italian, Finnish, Norwegian Bokmål, Danish, Icelandic, Dutch, Simplified Chinese, Hindi, and Bengali. Together with English and Swedish, MediaPrep now ships 14 interface languages.
+- All 14 locale files use UTF-8 with BOM, the same 737 keys in exactly the same order, and the same format placeholders as the en-US master.
+- Added `Languages\README.md` and `Languages\MASTER-en-US-0.11.54.sha256` to document the frozen master and translation maintenance rules.
+- Dynamic language discovery remains unchanged: the Start Center, system-default resolver, and per-folder subtitle-language selector discover valid `mediaprep.<culture>.json` resources automatically.
+- No language-resource keys were added and LanguageFileVersion remains 1.7.4. Muxing, queue/UNC processing, subtitle handling, classification, ratios, encoding, Dashboard behavior, and CPU/GPU layout are intentionally unchanged from beta 9.
+
+## 0.11.54 beta 9 - 2026-08-14
+
+- Relicensed the MediaPrep source code under GNU GPL version 3 or any later version (`GPL-3.0-or-later`), replacing the previous personal/non-commercial source-available license.
+- Added the complete GPLv3 license text as `LICENSE`, replaced `LICENSE.md` with a concise project notice, and added SPDX GPL identifiers to shipped PowerShell/CMD source files.
+- Added `THIRD-PARTY-LICENSES.md` and `ENCODER-LICENSING.md` to clearly separate MediaPrep copyright licensing, external-tool licensing, hardware API/SDK licensing and codec/patent considerations.
+- Documented the current external-tool model: official MediaPrep ZIPs do not bundle FFmpeg/ffprobe/MKVToolNix; the FFmpeg helper currently selects Gyan release-essentials builds, which Gyan identifies as GPLv3 builds.
+- Documented AV1/libaom and other AV1 paths as future lower-licensing-friction candidates without changing MediaPrep's existing HEVC encoding behavior.
+- Fixed `Test-MediaPrepLanguages.ps1` on Windows PowerShell 5.1 by resolving `$PSScriptRoot`/script path after `param(...)` binding and excluding the validator itself from the legacy `Msg(...)` source scan.
+- No language-resource keys or processing behavior were intentionally changed; en-US/sv-SE remain at LanguageFileVersion 1.7.4 with 737 keys.
+
+## 0.11.54 beta 8 - 2026-08-13
+
+- Completed the pre-translation localization audit without intentionally changing muxing, queue, classification, encoding, subtitle, statistics, or CPU/GPU behavior.
+- Migrated remaining normal user-facing strings to the shared locale JSON resources in the processing engine, Start Center, Queue Dashboard, queue console, external-tool/version manager, encoder verification, updater, local installer, GitHub web installer, and early startup paths.
+- Replaced the legacy bilingual `Msg(...)` implementation in `Manage-MediaPrepTools.ps1` with the common JSON language loader and en-US fallback.
+- Added common localization loading to Queue console, encoder-test live status, updater errors, local installer and web installer. The web installer now delays its normal banner until the release language resource is available.
+- Localized remaining operator-visible runtime exceptions, mux/cleanup/recommendation reasons, queue messages, updater failures, startup failures, and the last visible Dashboard fallback. Low-level troubleshooting diagnostics remain English by design.
+- Reorganized the flat language JSON files into identical logical blocks with alphabetic keys inside each block.
+- Added `App\Test-MediaPrepLanguages.ps1` to validate UTF-8 BOM, JSON/schema/language version, Culture/filename metadata, exact key count/order, placeholders, empty translations, mojibake, source key references and legacy `Msg(...)` usage.
+- Language resources increased to schema 1 / LanguageFileVersion 1.7.4 with 737 identical keys in `en-US` and `sv-SE`. `en-US` remains the master/fallback.
+- The additional planned translations are intentionally not included yet; the English master is to be frozen only after beta 8 localization/regression testing.
+
+## 0.11.54 beta 7 - 2026-08-13
+
+- Fixed UNC import/mux regression introduced with subtitle-language matching in beta 5 and exposed by valid-media testing in beta 6.
+- Avoids the Windows PowerShell `Argument types do not match` failure caused by `@(...)` around `New-Object System.Collections.Generic.List[object]`.
+- Subtitle language discovery/matching now uses safe `.Count` and `.ToArray()` access.
+- Fixed zero-result UNC analysis so an empty result stays an empty `object[]` instead of collapsing to `$null` before report generation.
+- Preserves beta 6 conditional subtitle-language prompt and queue-folder cleanup behavior.
+- Language resources remain schema 1 / LanguageFileVersion 1.7.3; no new localization keys.
+
+## 0.11.54 beta 6 - 2026-08-13
+
+- Refined per-folder subtitle language prompting: no dialog is shown when a folder has no matching external subtitles or when every matching subtitle already carries a recognized language suffix such as `.en/.eng/.sv/.swe`.
+- When one or more matching subtitles are untagged, MediaPrep asks once for the folder language and applies that choice to all untagged subtitles in that queue folder. Explicit filename language codes continue to override when enabled.
+- Removing the last error item from a queue folder now also removes that now-empty folder from `UncQueue`, its per-folder options, the current job state, and current-session queue statistics.
+- Language resource version increased to 1.7.3.
+
+## 0.11.54 beta 5 - 2026-08-13
+
+- Added per-UNC-folder subtitle language options when a folder is added to Queue mode. The language dropdown is built dynamically from the installed `Languages\mediaprep.*.json` resources; English is the default for new folders in this beta.
+- Added a default-on filename-language override. Explicit subtitle suffixes such as `.en.srt`, `.eng.srt`, `.sv.srt`, and `.swe.srt` are matched to the corresponding video and, when override is enabled, control the MKV subtitle language/track name.
+- Untagged subtitles such as `Movie.vtt` use the language selected for that queue folder. Folder subtitle options are saved with queue settings/packages so they survive restart/save/load, while the options dialog is shown again whenever a folder is added.
+- Removed the hardcoded `swe` / `Svenska` subtitle metadata path. Subtitle language metadata is now derived from the selected folder culture or an explicit recognized filename suffix.
+- Existing processed MKV results can be rerun when a new matching external subtitle is present (or Force remux is selected), allowing a folder to be processed again to add/fix subtitle tracks.
+- Fixed failed UNC imports being overwritten from `Error` to `WaitingForReturn`. Only successful import records may enter the return stage.
+- Fixed an explicit empty UNC analysis set being interpreted as “analyze the whole Processed folder”; a failed import with zero current outputs now analyzes zero MKVs instead of reusing unrelated old cache entries, and the existing analysis cache is preserved rather than replaced by an empty set.
+- A failed UNC import/probe now makes that queue item return a non-zero result while the queue continues with later folders. The failed folder remains in the queue for rerun, the UNC original is kept, and invalid local staging files are removed.
+- `Ignore decode errors` does not convert an unreadable source/import failure into success; it remains an encoding-tolerance option.
+- Language resource version increased to 1.7.2. TV/Film/Other classification, numbered episode-sequence detection, ratio calculations, CPU/GPU layout, and the proven encoding/UNC isolation model are otherwise unchanged.
+
+## 0.11.54 beta 4 - 2026-08-13
+
+- Added safe TV-series detection for numbered episode sequences such as `Descendants of the Sun 04/05` and `Naruto (Dub) 009/010`.
+- Sequence detection requires at least two files in the same folder with the same normalized title prefix and different trailing 2-3 digit numbers; a lone numeric title is not classified as TV by this rule.
+- File details/statistics now show `Episode number sequence` / `Avsnittsnummersekvens` as the detection reason.
+- Analysis cache model was advanced so older beta analysis entries are recalculated once and do not keep stale `Other` classifications.
+- Language resource version increased to 1.7.1 for the new detection reason.
+- Existing explicit episode patterns, year-based film detection, queue/UNC processing, MKV subtitle remuxing and All in one Dashboard inventory behavior are otherwise unchanged.
+
+## 0.11.54 beta 3 - 2026-08-13
+
+- Fixed All in one Dashboard inventory: selected local files are registered before the queue starts instead of leaving the Dashboard at 0/0.
+- The File details tab now receives classification, detection reason, target profile and MB/min values during All in one runs just as it already did in normal queue mode.
+- Successful All in one files are marked Completed after analysis/optional encoding because there is no UNC return stage in this mode.
+- Normal queue/UNC processing and the beta 2 MKV + external subtitle remux fix are otherwise unchanged.
+
+## 0.11.54 beta 2 - 2026-08-13
+
+- Fixed MKV input with matching external `.srt`/`.vtt`: MKV sources now discover external subtitles and are remuxed with them instead of always bypassing the mux path.
+- `Force remux` now also applies to selected MKV input. MKV without an external subtitle still uses the fast direct preparation path when force remux is off.
+- Added safe same-path MKV remux handling so a source is never deleted before a verified replacement exists.
+- Fixed unfinished-session recovery appearing behind the TopMost splash. The splash is closed before the recovery prompt and the prompt is explicitly brought to the foreground.
+- Startup diagnostics now identify the build as `0.11.54 beta 2`.
+
+## 0.11.54 beta 1 - 2026-08-13
+
+- Media classification no longer uses duration as a fallback. Episode patterns classify TV, year patterns classify films, and unrecognized names remain `Other`.
+- Added a saved `Target profile for Other files` preference (`TV series` or `Film`) so unknown names use the selected MB/min model without being misclassified.
+- Analysis now stores classification, detection reason, target profile, duration in minutes, actual MB/min, target MB/min, estimated target size and estimated saving.
+- Queue Dashboard adds a `File details` tab that shows classification and ratio data during a run and in archived statistics.
+- Queue dashboard inventory schema increased to version 4 and session statistics preserve the new per-file analysis fields.
+- Removed the old duration-based TV/film fallback.
+- Hardened post-update restart: the updater starts `MediaPrep-Start.ps1` directly, logs the restart PID and falls back to the CMD launcher if the direct restart exits early.
+- `Start MediaPrep.cmd` now launches the Start Center as a detached hidden-console PowerShell process, improving restart reliability when an older updater launches the newly installed package.
+- Language resource version increased to 1.7.0 for the new TV/Film/Other and ratio/detail labels. Only English and Swedish are shipped while localization cleanup is still in progress.
+- Three remaining internal Swedish verbose/debug messages were changed to English.
+
+## 0.11.53 - 2026-08-13
 
 - Added an independent startup splash screen and permanent startup diagnostics. The basic startup log remains compact, while Verbose logging adds timestamped fine-grained startup stage timings for troubleshooting.
 - Reduced Start Center startup time by reusing verified CPU/GPU information from preferences and an in-memory encoder signature snapshot instead of repeatedly querying FFmpeg and Windows hardware during one startup session.

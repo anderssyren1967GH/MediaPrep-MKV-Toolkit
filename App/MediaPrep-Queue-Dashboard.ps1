@@ -1,4 +1,6 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 param(
     [string]$Root = (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)),
     [switch]$VerboseLogging
@@ -34,6 +36,8 @@ $copyStatsPath=Join-Path $data 'queue-copy-stats.json'
 $runPath=Join-Path $data 'queue-run-current.json'
 $statisticsSessionPath=Join-Path $data 'statistics-run-current.json'
 $statisticsArchiveFolder=Join-Path $data 'Statistics'
+$settingsPath=Join-Path $data 'start-installningar.json'
+$jobPath=Join-Path $data 'senaste-kojobb.json'
 $script:StatisticsViewPath=$statisticsSessionPath
 $script:ArchiveView=$false
 $errorFolder=Join-Path $Root 'Error'
@@ -45,12 +49,13 @@ $tempFolder=Join-Path $data 'Temp'
 $script:QueueConsoleVisible=$false
 $script:MissingJsonLogged=@{}
 $script:LanguageSchemaVersion=1
-$script:RequiredLanguageFileVersion='1.6.0'
+$script:RequiredLanguageFileVersion='1.7.5'
 $script:FallbackLanguageCulture='en-US'
 $script:LanguageBase=[pscustomobject]@{}
 $script:L=[pscustomobject]@{}
 $script:ResolvedLanguageCode='en-US'
 $script:LanguageFileIsCurrent=$false
+$script:DashboardRequestedLanguagePreference='system'
 function Get-LanguageProperty([object]$Object,[string]$Name,$Default=$null){
     if($null-eq$Object){return $Default};$p=$Object.PSObject.Properties[$Name];if($null-eq$p){return $Default};return $p.Value
 }
@@ -103,6 +108,7 @@ function Initialize-DashboardLanguage{
         try{$o=Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8|ConvertFrom-Json;if($o.PSObject.Properties['Language'] -and $o.Language){$requested=[string]$o.Language;break}}catch{}
     }
     $requested=Normalize-LanguagePreference $requested
+    $script:DashboardRequestedLanguagePreference=$requested
     $baseDoc=Read-LanguageDocument (Get-LanguagePath $script:FallbackLanguageCulture)
     if($null-eq$baseDoc){$baseDoc=[pscustomobject]@{}}
     $script:LanguageBase=$baseDoc
@@ -199,6 +205,46 @@ function Remove-ErrorRecord([string]$RelativePath){
     $kept=@($records|Where-Object{(Get-RelativeKey ([string](Get-ObjectProperty $_ 'RelativePath' ''))) -ne $key})
     [void](Save-JsonAtomic $errorPath @($kept))
 }
+function Remove-QueueFolderIfEmpty([string]$RootPath,[object]$InventoryDoc){
+    if([string]::IsNullOrWhiteSpace($RootPath) -or $RootPath -eq 'Local / All in one'){return $false}
+    $rootKey=$RootPath.TrimEnd('\').ToLowerInvariant()
+    $remaining=0
+    if($null-ne$InventoryDoc -and $InventoryDoc.PSObject.Properties['items']){
+        foreach($item in @($InventoryDoc.items)){
+            $itemRoot=[string](Get-ObjectProperty $item 'Root' '')
+            if(-not[string]::IsNullOrWhiteSpace($itemRoot) -and $itemRoot.TrimEnd('\').ToLowerInvariant() -eq $rootKey){$remaining++}
+        }
+    }
+    if($remaining-gt0){return $false}
+
+    foreach($path in @($settingsPath,$jobPath)){
+        $state=Read-Json $path $null
+        if($null-eq$state){continue}
+        if($state.PSObject.Properties['UncQueue']){
+            $state.UncQueue=@($state.UncQueue|Where-Object{([string]$_).TrimEnd('\').ToLowerInvariant() -ne $rootKey})
+        }
+        if($state.PSObject.Properties['UncQueueOptions']){
+            $state.UncQueueOptions=@($state.UncQueueOptions|Where-Object{
+                $p=[string](Get-ObjectProperty $_ 'Path' '')
+                [string]::IsNullOrWhiteSpace($p) -or $p.TrimEnd('\').ToLowerInvariant() -ne $rootKey
+            })
+        }
+        [void](Save-JsonAtomic $path $state)
+    }
+
+    $statsDoc=Read-Json $statisticsSessionPath $null
+    if($null-ne$statsDoc -and $statsDoc.PSObject.Properties['Queues']){
+        $statsDoc.Queues=@($statsDoc.Queues|Where-Object{
+            $source=[string](Get-ObjectProperty $_ 'SourceRoot' '')
+            [string]::IsNullOrWhiteSpace($source) -or $source.TrimEnd('\').ToLowerInvariant() -ne $rootKey
+        })
+        Set-ObjectProperty $statsDoc 'LastUpdatedUtc' ((Get-Date).ToUniversalTime().ToString('o'))
+        [void](Save-JsonAtomic $statisticsSessionPath $statsDoc)
+    }
+    Write-DashboardLog 'INFO' ("Removed empty queue folder from current queue: {0}" -f $RootPath)
+    return $true
+}
+
 function Get-VideoCodec([string]$Path){
     if(-not(Test-Path -LiteralPath $ffprobePath -PathType Leaf) -or -not(Test-Path -LiteralPath $Path -PathType Leaf)){return ''}
     try{
@@ -238,7 +284,7 @@ function Review-SelectedError{
     if($null-eq$ctx){[Windows.Forms.MessageBox]::Show((T 'DashboardNoErrorSelection' 'Select a file in the error queue first.'),'MediaPrep')|Out-Null;return}
     $path=Get-ReviewPath $ctx
     if([string]::IsNullOrWhiteSpace($path)){
-        [Windows.Forms.MessageBox]::Show('Ingen lokal MKV hittades att granska.','MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
+        [Windows.Forms.MessageBox]::Show((T 'DashboardNoLocalMkvForReview' 'No local MKV was found to review.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null
         return
     }
     try{Start-Process -FilePath $path;Write-DashboardLog 'INFO' ("Review: {0}" -f $path)}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'MediaPrep')|Out-Null}
@@ -319,6 +365,7 @@ function Remove-SelectedError{
     if([Windows.Forms.MessageBox]::Show((T 'DashboardConfirmRemove' "Remove '{0}' from the error queue and the entire MediaPrep queue?`r`n`r`nLocal work/temp files are removed. The UNC original is left untouched." @($rel)),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning) -ne [Windows.Forms.DialogResult]::Yes){return}
     $doc=Read-Json $inventoryPath $null
     $it=Find-InventoryItem $doc $rel
+    $queueRoot=if($null-ne$it){[string](Get-ObjectProperty $it 'Root' '')}else{''}
     $paths=New-Object System.Collections.Generic.List[string]
     if($null-ne$it){
         foreach($n in @('LocalSource','LocalOutput')){$v=[string](Get-ObjectProperty $it $n '');if(-not[string]::IsNullOrWhiteSpace($v)){$paths.Add($v)}}
@@ -336,10 +383,18 @@ function Remove-SelectedError{
     }
     if($null-ne$doc -and $doc.PSObject.Properties['items']){
         $key=Get-RelativeKey $rel
-        $doc.items=@($doc.items|Where-Object{(Get-RelativeKey ([string](Get-ObjectProperty $_ 'RelativePath' ''))) -ne $key})
+        $selectedSource=if($null-ne$it){[string](Get-ObjectProperty $it 'SourcePath' '')}else{''}
+        $doc.items=@($doc.items|Where-Object{
+            if(-not[string]::IsNullOrWhiteSpace($selectedSource)){
+                -not [string]::Equals([string](Get-ObjectProperty $_ 'SourcePath' ''),$selectedSource,[StringComparison]::OrdinalIgnoreCase)
+            }else{
+                (Get-RelativeKey ([string](Get-ObjectProperty $_ 'RelativePath' ''))) -ne $key
+            }
+        })
         if($doc.PSObject.Properties['errors']){$doc.errors=[int]@($doc.items|Where-Object{[int](Get-ObjectProperty $_ 'QueueStage' 0)-ge90}).Count}
         if($doc.PSObject.Properties['updatedUtc']){$doc.updatedUtc=(Get-Date).ToUniversalTime().ToString('o')}
         [void](Save-JsonAtomic $inventoryPath $doc)
+        if(-not[string]::IsNullOrWhiteSpace($queueRoot)){[void](Remove-QueueFolderIfEmpty -RootPath $queueRoot -InventoryDoc $doc)}
     }
     Remove-ErrorRecord $rel
     Write-DashboardLog 'WARN' ("Manually removed from the complete queue: {0}. The UNC original was not changed." -f $rel)
@@ -410,6 +465,7 @@ $title.AutoSize=$true;$title.Location=New-Object Drawing.Point(18,14);$form.Cont
 $stats=New-Object Windows.Forms.GroupBox
 $stats.Text=(T 'DashboardCurrentStatistics' 'Current statistics');$stats.Location=New-Object Drawing.Point(18,52);$stats.Size=New-Object Drawing.Size(1025,105);$stats.Anchor='Top,Left,Right';$form.Controls.Add($stats)
 $labels=@{}
+$statCaptions=@{}
 $defs=@(
     @('remaining',(T 'DashboardRemaining' 'Remaining in queue'),15),
     @('processed',(T 'DashboardProcessed' 'Processed'),155),
@@ -420,7 +476,7 @@ $defs=@(
     @('errors',(T 'DashboardErrors' 'Errors'),900)
 )
 foreach($d in $defs){
-    $l=New-Object Windows.Forms.Label;$l.Text=$d[1];$l.AutoSize=$true;$l.Location=New-Object Drawing.Point($d[2],24);$stats.Controls.Add($l)
+    $l=New-Object Windows.Forms.Label;$l.Text=$d[1];$l.AutoSize=$true;$l.Location=New-Object Drawing.Point($d[2],24);$stats.Controls.Add($l);$statCaptions[$d[0]]=$l
     $v=New-Object Windows.Forms.Label;$v.Text='0';$v.AutoSize=$true;$v.Font=New-Object Drawing.Font('Segoe UI',12,[Drawing.FontStyle]::Bold);$v.Location=New-Object Drawing.Point($d[2],49);$stats.Controls.Add($v);$labels[$d[0]]=$v
 }
 $progress=New-Object Windows.Forms.ProgressBar;$progress.Location=New-Object Drawing.Point(15,78);$progress.Size=New-Object Drawing.Size(990,18);$progress.Anchor='Top,Left,Right';$stats.Controls.Add($progress)
@@ -429,14 +485,28 @@ $tabs=New-Object Windows.Forms.TabControl
 $tabs.Location=New-Object Drawing.Point(18,170);$tabs.Size=New-Object Drawing.Size(1025,430);$tabs.Anchor='Top,Bottom,Left,Right';$form.Controls.Add($tabs)
 
 $tabQueue=New-Object Windows.Forms.TabPage;$tabQueue.Text=(T 'DashboardTabRemaining' 'Remaining in queue')
+$tabDetails=New-Object Windows.Forms.TabPage;$tabDetails.Text=(T 'DashboardTabFileDetails' 'File details')
 $tabErr=New-Object Windows.Forms.TabPage;$tabErr.Text=(T 'DashboardTabError' 'Error queue')
 $tabRun=New-Object Windows.Forms.TabPage;$tabRun.Text=(T 'DashboardTabRun' 'Run statistics')
 $tabSlow=New-Object Windows.Forms.TabPage;$tabSlow.Text=(T 'DashboardTabSlow' 'Slow copies')
-$tabs.TabPages.AddRange(@($tabQueue,$tabErr,$tabRun,$tabSlow))
+$tabs.TabPages.AddRange(@($tabQueue,$tabDetails,$tabErr,$tabRun,$tabSlow))
 
 $qgrid=New-Object Windows.Forms.DataGridView;$qgrid.Dock='Fill';$qgrid.ReadOnly=$true;$qgrid.AllowUserToAddRows=$false;$qgrid.RowHeadersVisible=$false;$qgrid.SelectionMode='FullRowSelect';$qgrid.AutoSizeColumnsMode=[Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
 Add-Col $qgrid 'File' (T 'DashboardColumnFile' 'File') 310;Add-Col $qgrid 'Size' (T 'DashboardColumnSize' 'Size') 95;Add-Col $qgrid 'Subs' (T 'DashboardColumnSubs' 'Subs') 60;Add-Col $qgrid 'Status' (T 'DashboardColumnStatus' 'Status') 150;Add-Col $qgrid 'Path' (T 'DashboardColumnPath' 'Path') 360
 $tabQueue.Controls.Add($qgrid)
+
+$dgrid=New-Object Windows.Forms.DataGridView;$dgrid.Dock='Fill';$dgrid.ReadOnly=$true;$dgrid.AllowUserToAddRows=$false;$dgrid.RowHeadersVisible=$false;$dgrid.SelectionMode='FullRowSelect';$dgrid.AutoSizeColumnsMode=[Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+Add-Col $dgrid 'File' (T 'DashboardColumnFile' 'File') 260
+Add-Col $dgrid 'Class' (T 'DashboardColumnClassification' 'Classification') 105
+Add-Col $dgrid 'Profile' (T 'DashboardColumnTargetProfile' 'Target profile') 105
+Add-Col $dgrid 'Minutes' (T 'DashboardColumnDurationMin' 'Minutes') 75
+Add-Col $dgrid 'ActualRatio' (T 'DashboardColumnActualRatio' 'Actual MB/min') 105
+Add-Col $dgrid 'TargetRatio' (T 'DashboardColumnTargetRatio' 'Target MB/min') 105
+Add-Col $dgrid 'Saving' (T 'DashboardColumnSavingPercent' 'Saving %') 80
+Add-Col $dgrid 'Status' (T 'DashboardColumnStatus' 'Status') 125
+Add-Col $dgrid 'Detection' (T 'DashboardColumnDetection' 'Detected by') 145
+Add-Col $dgrid 'Path' (T 'DashboardColumnPath' 'Path') 340
+$tabDetails.Controls.Add($dgrid)
 
 $ePanel=New-Object Windows.Forms.Panel;$ePanel.Dock='Fill';$tabErr.Controls.Add($ePanel)
 $errorButtons=New-Object Windows.Forms.FlowLayoutPanel;$errorButtons.Dock='Bottom';$errorButtons.Height=52;$errorButtons.Padding=New-Object Windows.Forms.Padding(8,8,8,6);$errorButtons.WrapContents=$false;$ePanel.Controls.Add($errorButtons)
@@ -466,9 +536,95 @@ function Set-BottomButtonLayout {
     $bDetails.Left=$bLoadStats.Left-$gap-$bDetails.Width
     $status.Width=[Math]::Max(180,$bDetails.Left-$status.Left-10)
 }
+
+function Get-DashboardRequestedLanguagePreference {
+    $requested='system'
+    foreach($prefPath in @((Join-Path $data 'mediaprep.preferences.json'),(Join-Path $data 'config.json'))){
+        if(-not(Test-Path -LiteralPath $prefPath -PathType Leaf)){continue}
+        try{
+            $o=Get-Content -LiteralPath $prefPath -Raw -Encoding UTF8|ConvertFrom-Json
+            if($o.PSObject.Properties['Language'] -and $o.Language){$requested=[string]$o.Language;break}
+        }catch{}
+    }
+    return (Normalize-LanguagePreference $requested)
+}
+function Get-DashboardDirectionDisplay([string]$value){
+    switch(([string]$value).ToLowerInvariant()){
+        'in'  { return (T 'DashboardDirectionIn' 'In') }
+        'out' { return (T 'DashboardDirectionOut' 'Out') }
+        default { return $value }
+    }
+}
+function Apply-DashboardLanguage {
+    $form.Text=(T 'DashboardWindowTitle' 'MediaPrep - Queue statistics')
+    $title.Text=(T 'DashboardMonitorTitle' 'MediaPrep queue monitor')
+    $stats.Text=(T 'DashboardCurrentStatistics' 'Current statistics')
+    $captionValues=@{
+        remaining=(T 'DashboardRemaining' 'Remaining in queue')
+        processed=(T 'DashboardProcessed' 'Processed')
+        size=(T 'DashboardRemainingSize' 'Size remaining')
+        subs=(T 'DashboardSubtitlesRemaining' 'Subtitles remaining')
+        readyReturn=(T 'DashboardReadyMove' 'Ready to move')
+        completed=(T 'DashboardCompleted' 'Completed')
+        errors=(T 'DashboardErrors' 'Errors')
+    }
+    foreach($captionKey in @($captionValues.Keys)){
+        if($statCaptions.ContainsKey($captionKey)){$statCaptions[$captionKey].Text=[string]$captionValues[$captionKey]}
+    }
+    $tabQueue.Text=(T 'DashboardTabRemaining' 'Remaining in queue')
+    $tabDetails.Text=(T 'DashboardTabFileDetails' 'File details')
+    $tabErr.Text=(T 'DashboardTabError' 'Error queue')
+    $tabRun.Text=(T 'DashboardTabRun' 'Run statistics')
+    $tabSlow.Text=(T 'DashboardTabSlow' 'Slow copies')
+    $qgrid.Columns['File'].HeaderText=(T 'DashboardColumnFile' 'File')
+    $qgrid.Columns['Size'].HeaderText=(T 'DashboardColumnSize' 'Size')
+    $qgrid.Columns['Subs'].HeaderText=(T 'DashboardColumnSubs' 'Subs')
+    $qgrid.Columns['Status'].HeaderText=(T 'DashboardColumnStatus' 'Status')
+    $qgrid.Columns['Path'].HeaderText=(T 'DashboardColumnPath' 'Path')
+    $dgrid.Columns['File'].HeaderText=(T 'DashboardColumnFile' 'File')
+    $dgrid.Columns['Class'].HeaderText=(T 'DashboardColumnClassification' 'Classification')
+    $dgrid.Columns['Profile'].HeaderText=(T 'DashboardColumnTargetProfile' 'Target profile')
+    $dgrid.Columns['Minutes'].HeaderText=(T 'DashboardColumnDurationMin' 'Minutes')
+    $dgrid.Columns['ActualRatio'].HeaderText=(T 'DashboardColumnActualRatio' 'Actual MB/min')
+    $dgrid.Columns['TargetRatio'].HeaderText=(T 'DashboardColumnTargetRatio' 'Target MB/min')
+    $dgrid.Columns['Saving'].HeaderText=(T 'DashboardColumnSavingPercent' 'Saving %')
+    $dgrid.Columns['Status'].HeaderText=(T 'DashboardColumnStatus' 'Status')
+    $dgrid.Columns['Detection'].HeaderText=(T 'DashboardColumnDetection' 'Detected by')
+    $dgrid.Columns['Path'].HeaderText=(T 'DashboardColumnPath' 'Path')
+    $egrid.Columns['File'].HeaderText=(T 'DashboardColumnFile' 'File')
+    $egrid.Columns['Reason'].HeaderText=(T 'DashboardColumnReason' 'Error reason')
+    $egrid.Columns['Path'].HeaderText=(T 'DashboardColumnErrorPath' 'Error path')
+    $sgrid.Columns['File'].HeaderText=(T 'DashboardColumnFile' 'File')
+    $sgrid.Columns['Dir'].HeaderText=(T 'DashboardDirection' 'Direction')
+    $sgrid.Columns['Size'].HeaderText=(T 'DashboardColumnSize' 'Size')
+    $sgrid.Columns['Rate'].HeaderText='MB/s'
+    $sgrid.Columns['Time'].HeaderText=(T 'DashboardTime' 'Time')
+    $sgrid.Columns['Started'].HeaderText=(T 'DashboardStarted' 'Start')
+    $bReview.Text=(T 'DashboardReview' 'Review')
+    $bContinue.Text=(T 'DashboardContinue' 'Continue')
+    $bRemoveError.Text=(T 'DashboardRemove' 'Remove')
+    $bProcess.Text=(T 'DashboardProcessErrorQueue' 'Process error queue')
+    $bDetails.Text=if($script:QueueConsoleVisible){T 'DashboardHideDetails' 'Hide details'}else{T 'DashboardShowDetails' 'Show details'}
+    $bLoadStats.Text=(T 'DashboardLoadStatistics' 'Load statistics...')
+    $bCurrentStats.Text=(T 'DashboardCurrent' 'Current')
+    $bClose.Text=(T 'DashboardClose' 'Close')
+    Set-BottomButtonLayout
+}
+function Refresh-DashboardLanguageIfNeeded {
+    $requested=Get-DashboardRequestedLanguagePreference
+    if($requested -ne $script:DashboardRequestedLanguagePreference){
+        $before=$script:ResolvedLanguageCode
+        Initialize-DashboardLanguage
+        Apply-DashboardLanguage
+        Write-DashboardLog 'INFO' ("Dashboard language refreshed. Requested='{0}' resolved='{1}' previous='{2}' version='{3}'." -f $requested,$script:ResolvedLanguageCode,$before,(Get-LanguageProperty $script:L 'LanguageFileVersion' 'unknown'))
+    }
+}
 $form.Add_Resize({Set-BottomButtonLayout})
 Set-BottomButtonLayout
 Apply-DashboardTheme $form
+Initialize-DashboardLanguage
+Apply-DashboardLanguage
+Write-DashboardLog 'INFO' ("Dashboard language ready. Requested='{0}' resolved='{1}' version='{2}'." -f $script:DashboardRequestedLanguagePreference,$script:ResolvedLanguageCode,(Get-LanguageProperty $script:L 'LanguageFileVersion' 'unknown'))
 
 function Get-QueueConsoleHandle {
     try {
@@ -520,6 +676,17 @@ function Set-GridLayout{
         $qgrid.Columns['Status'].Width=150
         $qgrid.Columns['Path'].Width=$qAvail
 
+        $dgrid.Columns['File'].Width=260
+        $dgrid.Columns['Class'].Width=105
+        $dgrid.Columns['Profile'].Width=105
+        $dgrid.Columns['Minutes'].Width=75
+        $dgrid.Columns['ActualRatio'].Width=105
+        $dgrid.Columns['TargetRatio'].Width=105
+        $dgrid.Columns['Saving'].Width=80
+        $dgrid.Columns['Status'].Width=125
+        $dgrid.Columns['Detection'].Width=145
+        $dgrid.Columns['Path'].Width=340
+
         $eFixed=270+360
         $eAvail=[Math]::Max(300,$egrid.ClientSize.Width-$eFixed-25)
         $egrid.Columns['File'].Width=270
@@ -537,8 +704,19 @@ function Set-GridLayout{
     }catch{Write-DashboardLog 'ERROR' ('Set-GridLayout: '+$_.Exception.Message)}
 }
 
+function Get-MediaTypeDisplay([string]$value){
+    switch($value){'TV'{T 'MediaTypeTV' 'TV series'}'Film'{T 'MediaTypeFilm' 'Film'}'Other'{T 'MediaTypeOther' 'Other'}default{$value}}
+}
+function Get-DetectionDisplay([string]$value){
+    switch($value){'EpisodePattern'{T 'MediaDetectionEpisodePattern' 'Episode pattern'}'EpisodeNumberSequence'{T 'MediaDetectionEpisodeNumberSequence' 'Episode number sequence'}'YearPattern'{T 'MediaDetectionYearPattern' 'Year in filename'}'UnrecognizedName'{T 'MediaDetectionUnrecognizedName' 'Unrecognized filename'}default{$value}}
+}
+function Get-TargetProfileDisplay([string]$value){
+    switch($value){'TV'{T 'MediaTypeTV' 'TV series'}'Film'{T 'MediaTypeFilm' 'Film'}default{$value}}
+}
+
 function Refresh-Dashboard{
     try{
+    Refresh-DashboardLanguageIfNeeded
     $session=Read-Json $script:StatisticsViewPath $null
     if($script:ArchiveView -and $session){
         $archiveItems=New-Object System.Collections.Generic.List[object]
@@ -556,7 +734,7 @@ function Refresh-Dashboard{
                     $archiveStage=10
                     $archiveStatus='Completed'
                 }
-                $archiveItems.Add([pscustomobject][ordered]@{Root=[string](Get-ObjectProperty $aq 'SourceRoot' '');RelativePath=[string](Get-ObjectProperty $af 'RelativePath' '');SourcePath=[string](Get-ObjectProperty $af 'SourcePath' (Get-ObjectProperty $af 'RelativePath' ''));SourceSize=[int64](Get-ObjectProperty $af 'SourceSize' 0);MuxedSize=(Get-ObjectProperty $af 'MuxedSize' $null);EncodedSize=(Get-ObjectProperty $af 'EncodedSize' $null);FinalSize=(Get-ObjectProperty $af 'FinalSize' $null);SubtitleCount=[int](Get-ObjectProperty $af 'SubtitleCount' 0);QueueStage=$archiveStage;QueueStatus=$archiveStatus;ErrorMessage=[string](Get-ObjectProperty $af 'ErrorMessage' '');LocalOutput=[string](Get-ObjectProperty $af 'LocalOutput' '');ErrorLocalPath=[string](Get-ObjectProperty $af 'ErrorLocalPath' '')})
+                $archiveItems.Add([pscustomobject][ordered]@{Root=[string](Get-ObjectProperty $aq 'SourceRoot' '');RelativePath=[string](Get-ObjectProperty $af 'RelativePath' '');SourcePath=[string](Get-ObjectProperty $af 'SourcePath' (Get-ObjectProperty $af 'RelativePath' ''));SourceSize=[int64](Get-ObjectProperty $af 'SourceSize' 0);MuxedSize=(Get-ObjectProperty $af 'MuxedSize' $null);EncodedSize=(Get-ObjectProperty $af 'EncodedSize' $null);FinalSize=(Get-ObjectProperty $af 'FinalSize' $null);SubtitleCount=[int](Get-ObjectProperty $af 'SubtitleCount' 0);MediaType=[string](Get-ObjectProperty $af 'MediaType' '');MediaDetectionReason=[string](Get-ObjectProperty $af 'MediaDetectionReason' '');TargetProfile=[string](Get-ObjectProperty $af 'TargetProfile' '');DurationMinutes=[double](Get-ObjectProperty $af 'DurationMinutes' 0);CurrentMBPerMinute=[double](Get-ObjectProperty $af 'CurrentMBPerMinute' 0);TargetMBPerMinute=[double](Get-ObjectProperty $af 'TargetMBPerMinute' 0);ThresholdMBPerMinute=[double](Get-ObjectProperty $af 'ThresholdMBPerMinute' 0);TargetSizeMB=[double](Get-ObjectProperty $af 'TargetSizeMB' 0);EstimatedSavingMB=[double](Get-ObjectProperty $af 'EstimatedSavingMB' 0);EstimatedSavingPercent=[double](Get-ObjectProperty $af 'EstimatedSavingPercent' 0);Recommended=[bool](Get-ObjectProperty $af 'Recommended' $false);QueueStage=$archiveStage;QueueStatus=$archiveStatus;ErrorMessage=[string](Get-ObjectProperty $af 'ErrorMessage' '');LocalOutput=[string](Get-ObjectProperty $af 'LocalOutput' '');ErrorLocalPath=[string](Get-ObjectProperty $af 'ErrorLocalPath' '')})
             }
         }
         $inventoryDoc=[pscustomobject]@{version='archive';items=@($archiveItems.ToArray())}
@@ -567,7 +745,7 @@ function Refresh-Dashboard{
         $errs=@(Read-Json $errorPath @());$copy=@(Read-Json $copyStatsPath @());$run=Read-Json $runPath $null
     }
 
-    $qgrid.Rows.Clear();$egrid.Rows.Clear();$sgrid.Rows.Clear()
+    $qgrid.Rows.Clear();$dgrid.Rows.Clear();$egrid.Rows.Clear();$sgrid.Rows.Clear()
     foreach($btn in @($bReview,$bContinue,$bRemoveError,$bProcess)){$btn.Enabled=-not $script:ArchiveView}
     $remaining=0;$processed=0;$readyReturn=0;$completed=0;$bytes=0.0;$subs=0
     $inventoryErrors=New-Object System.Collections.Generic.List[object]
@@ -575,6 +753,14 @@ function Refresh-Dashboard{
         $stage=0
         try{$stage=[int](Get-ObjectProperty $it 'QueueStage' 0)}catch{$stage=0}
         $statusText=Get-StageText $stage ([string](Get-ObjectProperty $it 'QueueStatus' ''))
+        $mediaType=[string](Get-ObjectProperty $it 'MediaType' '')
+        $targetProfile=[string](Get-ObjectProperty $it 'TargetProfile' '')
+        [double]$durationMinutes=[double](Get-ObjectProperty $it 'DurationMinutes' 0)
+        [double]$actualRatio=[double](Get-ObjectProperty $it 'CurrentMBPerMinute' 0)
+        [double]$targetRatio=[double](Get-ObjectProperty $it 'TargetMBPerMinute' 0)
+        [double]$savingPercent=[double](Get-ObjectProperty $it 'EstimatedSavingPercent' 0)
+        $detection=[string](Get-ObjectProperty $it 'MediaDetectionReason' '')
+        [void]$dgrid.Rows.Add([IO.Path]::GetFileName([string](Get-ObjectProperty $it 'SourcePath' '')),(Get-MediaTypeDisplay $mediaType),(Get-TargetProfileDisplay $targetProfile),$(if($durationMinutes -gt 0){'{0:N1}' -f $durationMinutes}else{'-'}),$(if($actualRatio -gt 0){'{0:N1}' -f $actualRatio}else{'-'}),$(if($targetRatio -gt 0){'{0:N1}' -f $targetRatio}else{'-'}),$(if($actualRatio -gt 0){'{0:N1}' -f $savingPercent}else{'-'}),$statusText,(Get-DetectionDisplay $detection),[string](Get-ObjectProperty $it 'SourcePath' ''))
         $isError=($stage -ge 90)
         $isComplete=($stage -eq 10)
         if($isError){
@@ -729,7 +915,7 @@ function Refresh-Dashboard{
         $rate=[double](Get-ObjectProperty $c 'MBps' 0)
         $slow=($rate -lt 30) -or ($avg -gt 0 -and $rate -lt ($avg*0.5))
         if($slow){
-            [void]$sgrid.Rows.Add([IO.Path]::GetFileName([string](Get-ObjectProperty $c 'File' '')),[string](Get-ObjectProperty $c 'Direction' ''),(SizeText([double](Get-ObjectProperty $c 'Bytes' 0))),('{0:N1}'-f$rate),([TimeSpan]::FromSeconds([double](Get-ObjectProperty $c 'Seconds' 0)).ToString('hh\:mm\:ss')),[string](Get-ObjectProperty $c 'StartedLocal' ''))
+            [void]$sgrid.Rows.Add([IO.Path]::GetFileName([string](Get-ObjectProperty $c 'File' '')),(Get-DashboardDirectionDisplay ([string](Get-ObjectProperty $c 'Direction' ''))),(SizeText([double](Get-ObjectProperty $c 'Bytes' 0))),('{0:N1}'-f$rate),([TimeSpan]::FromSeconds([double](Get-ObjectProperty $c 'Seconds' 0)).ToString('hh\:mm\:ss')),[string](Get-ObjectProperty $c 'StartedLocal' ''))
         }
     }
     $viewName=if($script:ArchiveView){T 'DashboardArchive' 'ARCHIVE: {0}' @([IO.Path]::GetFileName($script:StatisticsViewPath))}else{T 'DashboardCurrentSession' 'CURRENT SESSION'};$status.Text=(T 'DashboardLastUpdated' 'Last updated: {0:HH:mm:ss} | {1} | Inventory v{2}: {3} items | Error queue: {4}' @((Get-Date),$viewName,$(if($inventoryDoc){$inventoryDoc.version}else{'-'}),$total,$errorCount))

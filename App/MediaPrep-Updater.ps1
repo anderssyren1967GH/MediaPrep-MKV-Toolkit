@@ -1,4 +1,6 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Root,
@@ -23,6 +25,42 @@ function Write-UpdateLog([string]$Level,[string]$Message){
 }
 function Read-Json([string]$Path){if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){return $null};return(Get-Content -LiteralPath $Path -Raw -Encoding UTF8|ConvertFrom-Json)}
 function Write-Json([string]$Path,[object]$Value){$Value|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $Path -Encoding UTF8}
+function Normalize-UpdaterLanguage([string]$Code){
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'}
+    $v=$Code.Trim()
+    switch($v.ToLowerInvariant()){'system'{return 'system'};'default'{return 'system'};'en'{return 'en-US'};'english'{return 'en-US'};'sv'{return 'sv-SE'};'swedish'{return 'sv-SE'};'svenska'{return 'sv-SE'}}
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($v)).Name}catch{return $v}
+}
+$script:UpdaterLanguageBase=$null
+$script:UpdaterLanguage=$null
+function Get-UpdaterLanguageDocument([string]$Code){
+    $folder=Join-Path $Root 'Languages'
+    $path=Join-Path $folder ('mediaprep.'+$Code+'.json')
+    if(Test-Path -LiteralPath $path -PathType Leaf){try{return (Read-Json $path)}catch{}}
+    try{
+        $requested=[Globalization.CultureInfo]::GetCultureInfo($Code)
+        foreach($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+            if($file.Name -notmatch '^mediaprep\.(.+)\.json$'){continue}
+            try{$candidate=[Globalization.CultureInfo]::GetCultureInfo($Matches[1]);if($candidate.TwoLetterISOLanguageName -ieq $requested.TwoLetterISOLanguageName){return (Read-Json $file.FullName)}}catch{}
+        }
+    }catch{}
+    return $null
+}
+function Initialize-UpdaterLanguage {
+    $script:UpdaterLanguageBase=Get-UpdaterLanguageDocument 'en-US'
+    $language='system'
+    try{$prefs=Read-Json (Join-Path $dataFolder 'mediaprep.preferences.json');if($prefs -and $prefs.PSObject.Properties['Language']){$language=[string]$prefs.Language}}catch{}
+    $requested=Normalize-UpdaterLanguage $language
+    if($requested-eq'system'){$requested=[Globalization.CultureInfo]::CurrentUICulture.Name}
+    $script:UpdaterLanguage=Get-UpdaterLanguageDocument $requested
+    if($null-eq$script:UpdaterLanguage){$script:UpdaterLanguage=$script:UpdaterLanguageBase}
+}
+function T([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@()){
+    $bp=if($script:UpdaterLanguageBase){$script:UpdaterLanguageBase.PSObject.Properties[$Key]}else{$null};$base=if($bp -and -not[string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p=if($script:UpdaterLanguage){$script:UpdaterLanguage.PSObject.Properties[$Key]}else{$null};$value=if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $safeArgs=@($FormatArgs);if($safeArgs.Count-gt0){try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$safeArgs)}catch{};try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$safeArgs)}catch{return $Fallback}};return $value
+}
+Initialize-UpdaterLanguage
 function P([object]$Object,[string]$Name,$Default=$null){
     if($null -eq $Object){return $Default}
     $p=$Object.PSObject.Properties[$Name]
@@ -113,13 +151,13 @@ $isBackupRestore=$false
 try{
     Write-UpdateLog INFO 'Updater started.'
     $request=Read-Json $RequestFile
-    if($null-eq$request){throw 'Update request could not be read.'}
+    if($null-eq$request){throw (T 'UpdaterRequestUnreadable' 'Update request could not be read.')}
     $stageRoot=[string](P $request 'StageRoot' '')
     $targetVersion=[string](P $request 'TargetVersion' '')
     $currentVersion=[string](P $request 'CurrentVersion' 'unknown')
     $isBackupRestore=[bool](P $request 'IsBackupRestore' $false)
-    if([string]::IsNullOrWhiteSpace($stageRoot) -or -not(Test-Path -LiteralPath $stageRoot -PathType Container)){throw ('Staged program files are missing: '+$stageRoot)}
-    if(-not(Test-Path -LiteralPath (Join-Path $stageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw 'Staged package is incomplete: App\MediaPrep-Start.ps1 is missing.'}
+    if([string]::IsNullOrWhiteSpace($stageRoot) -or -not(Test-Path -LiteralPath $stageRoot -PathType Container)){throw (T 'UpdaterStagedFilesMissing' 'Staged program files are missing: {0}' @($stageRoot))}
+    if(-not(Test-Path -LiteralPath (Join-Path $stageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw (T 'UpdaterStagedPackageIncomplete' 'Staged package is incomplete: App\MediaPrep-Start.ps1 is missing.')}
 
     if($ParentPid -gt0){
         Write-UpdateLog INFO ("Waiting for Start Center PID {0} to exit." -f $ParentPid)
@@ -128,11 +166,11 @@ try{
             if($null-eq(Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)){break}
             Start-Sleep -Milliseconds 250
         }
-        if($null-ne(Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)){throw 'Start Center did not close within 60 seconds.'}
+        if($null-ne(Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)){throw (T 'UpdaterStartCenterDidNotClose' 'Start Center did not close within 60 seconds.')}
     }
 
     if(Test-MediaPrepWorkerActive){
-        throw 'MediaPrep update was cancelled because a queue or media worker is still running.'
+        throw (T 'UpdaterWorkerStillRunning' 'MediaPrep update was cancelled because a queue or media worker is still running.')
     }
     Write-UpdateLog INFO 'Queue/media worker safety check passed.'
 
@@ -152,13 +190,13 @@ try{
     Unblock-ProgramPayload -Destination $Root
     Normalize-CmdFile -Path (Join-Path $Root 'Start MediaPrep.cmd')
     Normalize-CmdFile -Path (Join-Path $Root 'Error\Bearbeta felko.cmd')
-    if(-not(Test-Path -LiteralPath (Join-Path $Root 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw 'Activation verification failed: MediaPrep-Start.ps1 is missing.'}
-    if(-not(Test-Path -LiteralPath (Join-Path $Root 'Start MediaPrep.cmd') -PathType Leaf)){throw 'Activation verification failed: Start MediaPrep.cmd is missing.'}
+    if(-not(Test-Path -LiteralPath (Join-Path $Root 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw (T 'UpdaterActivationStartScriptMissing' 'Activation verification failed: MediaPrep-Start.ps1 is missing.')}
+    if(-not(Test-Path -LiteralPath (Join-Path $Root 'Start MediaPrep.cmd') -PathType Leaf)){throw (T 'UpdaterActivationLauncherMissing' 'Activation verification failed: Start MediaPrep.cmd is missing.')}
     Update-VersionMetadata -Version $targetVersion
     $targetSupportsResult=$false
     try{$targetSupportsResult=([version]$targetVersion -ge [version]'0.11.52')}catch{}
     if($targetSupportsResult){
-        Write-Json $resultPath ([pscustomobject][ordered]@{Success=$true;TargetVersion=$targetVersion;PreviousVersion=$currentVersion;BackupPath=$backupPath;CompletedLocal=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss');Message=('MediaPrep '+$targetVersion+' was installed successfully.');LogPath=$logPath})
+        Write-Json $resultPath ([pscustomobject][ordered]@{Success=$true;TargetVersion=$targetVersion;PreviousVersion=$currentVersion;BackupPath=$backupPath;CompletedLocal=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss');Message='';LogPath=$logPath})
     }else{
         Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
     }
@@ -184,8 +222,30 @@ catch{
 }
 finally{
     try{
-        $launcher=Join-Path $Root 'Start MediaPrep.cmd'
-        if(Test-Path -LiteralPath $launcher -PathType Leaf){Start-Process -FilePath $launcher -WorkingDirectory $Root|Out-Null}
+        # Restart the graphical Start Center directly instead of relying only on the
+        # .cmd file association. Log and verify the new process, then use the CMD
+        # launcher as a fallback if the direct restart exits immediately.
+        $startScript=Join-Path $Root 'App\MediaPrep-Start.ps1'
+        $restartProcess=$null
+        if(Test-Path -LiteralPath $startScript -PathType Leaf){
+            $restartArgs='-NoProfile -ExecutionPolicy Bypass -STA -File "'+$startScript+'"'
+            $restartProcess=Start-Process -FilePath 'powershell.exe' -ArgumentList $restartArgs -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+            Write-UpdateLog INFO ('MediaPrep restart requested. PID='+[string]$restartProcess.Id)
+            Start-Sleep -Milliseconds 1200
+            try{
+                if($restartProcess.HasExited){
+                    Write-UpdateLog WARN ('Direct restart process exited early with code '+[string]$restartProcess.ExitCode+'. Trying Start MediaPrep.cmd fallback.')
+                    $restartProcess=$null
+                }
+            }catch{}
+        }
+        if($null-eq$restartProcess){
+            $launcher=Join-Path $Root 'Start MediaPrep.cmd'
+            if(Test-Path -LiteralPath $launcher -PathType Leaf){
+                $fallback=Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c','start','""',('"'+$launcher+'"')) -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+                Write-UpdateLog INFO ('MediaPrep restart fallback requested. Launcher PID='+[string]$fallback.Id)
+            }else{throw (T 'UpdaterRestartLauncherMissing' 'Neither MediaPrep-Start.ps1 nor Start MediaPrep.cmd is available for restart.')}
+        }
     }catch{Write-UpdateLog ERROR ('Could not restart MediaPrep: '+$_.Exception.Message)}
     if($DeleteSelf){
         try{Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue}catch{}

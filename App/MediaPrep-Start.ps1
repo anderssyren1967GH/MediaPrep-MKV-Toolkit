@@ -1,10 +1,12 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]param([switch]$SkipElevation)
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 
 
-# 0.11.53 startup diagnostics. This log is deliberately created before WinForms
+# 0.11.54 final startup diagnostics. This log is deliberately created before WinForms
 # initialization so an early startup failure cannot disappear without a trace.
 $script:StartupWatch=[Diagnostics.Stopwatch]::StartNew()
 $script:StartScriptPath=$MyInvocation.MyCommand.Path
@@ -24,7 +26,7 @@ function Initialize-StartupTrace {
         $folder=Join-Path $script:Root 'Loggar'
         if(-not(Test-Path -LiteralPath $folder -PathType Container)){New-Item -ItemType Directory -Path $folder -Force|Out-Null}
         $script:StartupTracePath=Join-Path $folder 'MediaPrep-Startup.log'
-        $header="MediaPrep MKV Toolkit 0.11.53 startup trace`r`nStarted: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'))`r`n"
+        $header="MediaPrep MKV Toolkit 0.11.54 startup trace`r`nStarted: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'))`r`n"
         [IO.File]::WriteAllText($script:StartupTracePath,$header,(New-Object Text.UTF8Encoding($false)))
     }catch{$script:StartupTracePath=$null}
 }
@@ -126,11 +128,51 @@ function Stop-MediaPrepSplash {
 Initialize-StartupTrace
 Write-StartupTrace 'ScriptStarted'
 
+# Minimal pre-WinForms localization for the ConstrainedLanguage stop message.
+# If policy restrictions also prevent reading JSON, English remains the safe fallback.
+function Read-EarlyLanguageDocument([string]$Culture){
+    try{
+        $path=Join-Path (Join-Path $script:Root 'Languages') ('mediaprep.'+$Culture+'.json')
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return $null}
+        return (Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json)
+    }catch{return $null}
+}
+function Get-EarlyLanguageValue([object]$Doc,[string]$Key,[string]$Fallback){
+    try{
+        if($null-ne$Doc){$p=$Doc.PSObject.Properties[$Key];if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){return [string]$p.Value}}
+    }catch{}
+    return $Fallback
+}
+function Get-EarlyLanguageDocument{
+    $requested='system'
+    foreach($settingsPath in @((Join-Path (Join-Path $script:Root 'Data') 'mediaprep.preferences.json'),(Join-Path (Join-Path $script:Root 'Data') 'config.json'))){
+        try{
+            if(-not(Test-Path -LiteralPath $settingsPath -PathType Leaf)){continue}
+            $settings=Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8|ConvertFrom-Json
+            if($settings -and $settings.PSObject.Properties['Language'] -and -not[string]::IsNullOrWhiteSpace([string]$settings.Language)){$requested=[string]$settings.Language;break}
+        }catch{}
+    }
+    switch($requested.ToLowerInvariant()){'en'{return (Read-EarlyLanguageDocument 'en-US')};'english'{return (Read-EarlyLanguageDocument 'en-US')};'sv'{return (Read-EarlyLanguageDocument 'sv-SE')};'swedish'{return (Read-EarlyLanguageDocument 'sv-SE')};'svenska'{return (Read-EarlyLanguageDocument 'sv-SE')};default{}}
+    if($requested -and $requested -notmatch '^(?i:system|default)$'){
+        try{$normalized=([Globalization.CultureInfo]::GetCultureInfo($requested)).Name;$doc=Read-EarlyLanguageDocument $normalized;if($doc){return $doc}}catch{}
+    }
+    try{
+        $ui=[Globalization.CultureInfo]::CurrentUICulture
+        $doc=Read-EarlyLanguageDocument $ui.Name
+        if($doc){return $doc}
+        foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'Languages') -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+            try{$candidate=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8|ConvertFrom-Json;$culture=[Globalization.CultureInfo]::GetCultureInfo([string]$candidate.Culture);if($culture.TwoLetterISOLanguageName -ieq $ui.TwoLetterISOLanguageName){return $candidate}}catch{}
+        }
+    }catch{}
+    return (Read-EarlyLanguageDocument 'en-US')
+}
+$script:EarlyLanguageDocument=Get-EarlyLanguageDocument
+
 # MediaPrep's graphical interface requires FullLanguage. On systems where
 # AppLocker/WDAC enforces ConstrainedLanguage, stop before loading WinForms so
 # the user gets a clear explanation instead of a cascade of type/method errors.
 if ([string]$ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') {
-    $clmMessage = @'
+    $clmMessage = Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupConstrainedLanguageMessage' @'
 MediaPrep MKV Toolkit cannot start.
 
 This computer enforces PowerShell ConstrainedLanguage.
@@ -149,7 +191,7 @@ MediaPrep will now close.
         }
     } catch {}
     Write-Host $clmMessage -ForegroundColor Yellow
-    if(-not $shown){Write-Host 'The message could not be displayed as a Windows popup.' -ForegroundColor Yellow}
+    if(-not $shown){Write-Host (Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupPopupFailed' 'The message could not be displayed as a Windows popup.') -ForegroundColor Yellow}
     exit 10
 }
 
@@ -322,9 +364,9 @@ function Test-UncQueueAccess {
         $accessTest=Join-Path $path ('.mediaprep-access-test-'+[guid]::NewGuid().ToString('N')+'.tmp')
         try{
             [IO.File]::WriteAllText($accessTest,'MediaPrep access test',(New-Object Text.UTF8Encoding($false)))
-            if(-not(Test-Path -LiteralPath $accessTest -PathType Leaf)){throw 'Write verification failed.'}
+            if(-not(Test-Path -LiteralPath $accessTest -PathType Leaf)){throw (T 'UncWriteVerificationFailed' 'Write verification failed.')}
             Remove-Item -LiteralPath $accessTest -Force
-            if(Test-Path -LiteralPath $accessTest -PathType Leaf){throw 'Delete verification failed.'}
+            if(Test-Path -LiteralPath $accessTest -PathType Leaf){throw (T 'UncDeleteVerificationFailed' 'Delete verification failed.')}
         }catch{
             Remove-Item -LiteralPath $accessTest -Force -ErrorAction SilentlyContinue
             [Windows.Forms.MessageBox]::Show((T 'UncPermissionTestFailed' 'MediaPrep can read the folder but could not verify write/delete access: {0}`r`n`r`n{1}' @($path,$_.Exception.Message)),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null
@@ -360,17 +402,23 @@ trap {
             ('Stack: {0}' -f $_.ScriptStackTrace)
         ) -join [Environment]::NewLine
         [IO.File]::WriteAllText($startupLog, $details, (New-Object Text.UTF8Encoding($true)))
+        $startupMessage=Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupFailureMessageWithLog' 'MediaPrep could not start.`r`n`r`n{0}`r`n`r`nStartup log:`r`n{1}'
+        try{$startupMessage=[string]::Format([Globalization.CultureInfo]::CurrentCulture,$startupMessage,@($_.Exception.Message,$startupLog))}catch{$startupMessage="MediaPrep could not start.`r`n`r`n$($_.Exception.Message)`r`n`r`nStartup log:`r`n$startupLog"}
+        $startupTitle=Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupFailureTitle' 'MediaPrep startup error'
         [Windows.Forms.MessageBox]::Show(
-            "MediaPrep could not start.`r`n`r`n$($_.Exception.Message)`r`n`r`nStartup log:`r`n$startupLog",
-            'MediaPrep startup error',
+            $startupMessage,
+            $startupTitle,
             [Windows.Forms.MessageBoxButtons]::OK,
             [Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
     }
     catch {
+        $startupMessage=Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupFailureMessage' 'MediaPrep could not start.`r`n`r`n{0}'
+        try{$startupMessage=[string]::Format([Globalization.CultureInfo]::CurrentCulture,$startupMessage,@($_.Exception.Message))}catch{$startupMessage="MediaPrep could not start.`r`n`r`n$($_.Exception.Message)"}
+        $startupTitle=Get-EarlyLanguageValue $script:EarlyLanguageDocument 'StartupFailureTitle' 'MediaPrep startup error'
         [Windows.Forms.MessageBox]::Show(
-            "MediaPrep could not start.`r`n`r`n$($_.Exception.Message)",
-            'MediaPrep startup error',
+            $startupMessage,
+            $startupTitle,
             [Windows.Forms.MessageBoxButtons]::OK,
             [Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
@@ -457,6 +505,7 @@ $script:QueueDashboardProcess = $null
 $script:SuppressDashboardShutdownOnClose = $false
 $script:QueueRunActive = $false
 $script:UncItems = @()
+$script:UncQueueOptions = @{}
 $script:LocalItems = @()
 $script:LastWorkMode = $null
 $script:StatisticsCurrentPath = Join-Path (Join-Path $script:Root 'Data') 'statistics-run-current.json'
@@ -557,7 +606,7 @@ function Add-SessionQueuesFromInventory {
                 try{if([string]::Equals([IO.Path]::ChangeExtension($fr,$null),[IO.Path]::ChangeExtension($rel,$null),[StringComparison]::OrdinalIgnoreCase)){$found=$f;break}}catch{}
             }
             if($null -eq $found){
-                $files += [pscustomobject][ordered]@{SourcePath=[string](P $it 'SourcePath' '');RelativePath=$rel;SourceSize=[int64](P $it 'SourceSize' 0);MuxedSize=(P $it 'MuxedSize' $null);EncodedSize=(P $it 'EncodedSize' $null);FinalSize=(P $it 'FinalSize' $null);QueueStage=[int](P $it 'QueueStage' 0);QueueStatus=[string](P $it 'QueueStatus' 'Waiting');CopyInBytes=0;CopyInSeconds=0;CopyInMBps=0;CopyBackBytes=0;CopyBackSeconds=0;CopyBackMBps=0;CopyEvents=@();Result='Pending'}
+                $files += [pscustomobject][ordered]@{SourcePath=[string](P $it 'SourcePath' '');RelativePath=$rel;SourceSize=[int64](P $it 'SourceSize' 0);MuxedSize=(P $it 'MuxedSize' $null);EncodedSize=(P $it 'EncodedSize' $null);FinalSize=(P $it 'FinalSize' $null);MediaType=[string](P $it 'MediaType' '');MediaDetectionReason=[string](P $it 'MediaDetectionReason' '');TargetProfile=[string](P $it 'TargetProfile' '');DurationMinutes=[double](P $it 'DurationMinutes' 0);CurrentMBPerMinute=[double](P $it 'CurrentMBPerMinute' 0);TargetMBPerMinute=[double](P $it 'TargetMBPerMinute' 0);ThresholdMBPerMinute=[double](P $it 'ThresholdMBPerMinute' 0);TargetSizeMB=[double](P $it 'TargetSizeMB' 0);EstimatedSavingMB=[double](P $it 'EstimatedSavingMB' 0);EstimatedSavingPercent=[double](P $it 'EstimatedSavingPercent' 0);Recommended=[bool](P $it 'Recommended' $false);QueueStage=[int](P $it 'QueueStage' 0);QueueStatus=[string](P $it 'QueueStatus' 'Waiting');CopyInBytes=0;CopyInSeconds=0;CopyInMBps=0;CopyBackBytes=0;CopyBackSeconds=0;CopyBackMBps=0;CopyEvents=@();Result='Pending'}
             }
         }
         if($existing.PSObject.Properties['Files']){$existing.Files=@($files)}else{$existing|Add-Member -NotePropertyName Files -NotePropertyValue @($files)}
@@ -589,7 +638,16 @@ function Pause-StatisticsRun {
     Save-StatisticsSession $session
 }
 function New-RecoveryChoiceDialog {
-    $d=New-Object Windows.Forms.Form;$d.Text=T 'RecoverySessionTitle' 'MediaPrep - unfinished session';$d.StartPosition='CenterScreen';$d.FormBorderStyle='FixedDialog';$d.MaximizeBox=$false;$d.MinimizeBox=$false;$d.ClientSize=New-Object Drawing.Size(560,205)
+    # An unfinished-session prompt requires user interaction. Close the separate
+    # TopMost splash first, otherwise the recovery dialog can open behind it and
+    # make startup appear hung until the splash failsafe expires.
+    Write-StartupTrace 'RecoveryDialogRequested'
+    Stop-MediaPrepSplash
+    try{
+        if($null-ne$script:SplashProcess -and -not$script:SplashProcess.HasExited){[void]$script:SplashProcess.WaitForExit(1500)}
+    }catch{}
+    $d=New-Object Windows.Forms.Form;$d.Text=T 'RecoverySessionTitle' 'MediaPrep - unfinished session';$d.StartPosition='CenterScreen';$d.FormBorderStyle='FixedDialog';$d.MaximizeBox=$false;$d.MinimizeBox=$false;$d.TopMost=$true;$d.ClientSize=New-Object Drawing.Size(560,205)
+    $d.Add_Shown({$d.Activate();$d.BringToFront()})
     $l=New-Object Windows.Forms.Label;$l.Location=New-Object Drawing.Point(18,18);$l.Size=New-Object Drawing.Size(524,78);$l.Text=T 'RecoverySessionMessage' 'MediaPrep found a session file that did not close normally.';$d.Controls.Add($l)
     $continue=New-Object Windows.Forms.Button;$continue.Text=T 'RecoveryContinue' 'Continue';$continue.Location=New-Object Drawing.Point(78,132);$continue.Size=New-Object Drawing.Size(120,38);$continue.Tag='Continue';$d.Controls.Add($continue)
     $save=New-Object Windows.Forms.Button;$save.Text=T 'RecoverySaveLater' 'Save for later';$save.Location=New-Object Drawing.Point(210,132);$save.Size=New-Object Drawing.Size(140,38);$save.Tag='Save';$d.Controls.Add($save)
@@ -683,7 +741,7 @@ function P {
 }
 function Default-Prefs {
     return [pscustomobject][ordered]@{
-        Version = '0.11.53'
+        Version = '0.11.54'
         Language = 'system'
         ApplicationFolder = $script:Root
         SourceFolder = (Join-Path $script:Root 'UnProcessed')
@@ -697,6 +755,9 @@ function Default-Prefs {
         MkvmergePath = (Join-Path $script:Root 'Tools\MKVToolNix\mkvmerge.exe')
         TVTargetMBPerMinute = 15.0
         MovieTargetMBPerMinute = 17.0
+        UnknownMediaTargetProfile = 'Film'
+        DefaultSubtitleCulture = 'en-US'
+        SubtitleFilenameOverride = $true
         EncodeThresholdMultiplier = 1.25
         MinimumSavingPercent = 20.0
         Theme = 'Light'
@@ -714,7 +775,8 @@ function Default-Settings {
         Mode='Full'; WorkMode='Queue'; NoConfirm=$true; EnableEncoding=$true; EncodeRecommended=$true; Force=$false; IgnoreDecodeErrors=$false; ProcessErrorQueue=$false
         VideoFormats=@('.ts','.mp4','.avi','.mpg','.mpeg')
         Reanalyze=$false; RebuildIndex=$false; NoPause=$true; UncEnabled=$true
-        UncQueue=@(); LocalFileQueue=@(); TemporarySourceFolder=''; TemporaryOutputFolder='';
+        UncQueue=@(); UncQueueOptions=@(); LocalFileQueue=@(); TemporarySourceFolder=''; TemporaryOutputFolder='';
+        DefaultSubtitleCulture='en-US'; SubtitleFilenameOverride=$true
         DeleteUncAfterSuccess=$true; ShutdownAfterSuccess=$false
         PreventSleep=$true; PreventUpdateRestart=$false; VerboseLogging=$false; EncoderId='cpu-libx265'
     }
@@ -760,7 +822,7 @@ function Ensure-WorkingFolder {
 
 # Preferences are optional. Missing, partial or invalid values fall back to the script folder.
 $script:Prefs = Merge-Defaults -Loaded (Read-Json -Path $script:PreferencesPath -Default $null) -Defaults (Default-Prefs)
-$script:Prefs.Version = '0.11.53'
+$script:Prefs.Version = '0.11.54'
 $script:Prefs.ApplicationFolder = Resolve-ConfiguredPath -Value $script:Prefs.ApplicationFolder -FallbackRelative '.'
 if (-not (Test-Path -LiteralPath $script:Prefs.ApplicationFolder -PathType Container)) {
     $script:Prefs.ApplicationFolder = $script:Root
@@ -782,6 +844,8 @@ $script:Prefs.MkvmergePath = Resolve-ConfiguredPath -Value $script:Prefs.Mkvmerg
 if ([string]::IsNullOrWhiteSpace([string]$script:Prefs.Language)) { $script:Prefs.Language = 'system' }
 $script:Prefs.TVTargetMBPerMinute = [double](P $script:Prefs 'TVTargetMBPerMinute' 15.0)
 $script:Prefs.MovieTargetMBPerMinute = [double](P $script:Prefs 'MovieTargetMBPerMinute' 17.0)
+$script:Prefs.UnknownMediaTargetProfile = [string](P $script:Prefs 'UnknownMediaTargetProfile' 'Film')
+if($script:Prefs.UnknownMediaTargetProfile -notin @('TV','Film')){$script:Prefs.UnknownMediaTargetProfile='Film'}
 $script:Prefs.EncodeThresholdMultiplier = [double](P $script:Prefs 'EncodeThresholdMultiplier' 1.25)
 $script:Prefs.MinimumSavingPercent = [double](P $script:Prefs 'MinimumSavingPercent' 20.0)
 $script:Prefs.Theme = [string](P $script:Prefs 'Theme' 'Light')
@@ -797,7 +861,7 @@ if($script:Prefs.EncoderBenchmarkSeconds -lt 5 -or $script:Prefs.EncoderBenchmar
 # en-US is the authoritative fallback. A same-schema older translation may still
 # be used safely: missing keys and format errors fall back to en-US.
 $script:LanguageSchemaVersion = 1
-$script:RequiredLanguageFileVersion = '1.6.0'
+$script:RequiredLanguageFileVersion = '1.7.5'
 $script:FallbackLanguageCulture = 'en-US'
 $script:LanguageBase = [pscustomobject]@{}
 $script:L = [pscustomobject]@{}
@@ -1125,7 +1189,7 @@ function Show-GuiError {
     )
     $logPath = Write-GuiErrorLog -ErrorRecord $ErrorRecord -Context $Context
     $message = $ErrorRecord.Exception.Message
-    if (-not [string]::IsNullOrWhiteSpace($logPath)) { $message += "`r`n`r`nLog: $logPath" }
+    if (-not [string]::IsNullOrWhiteSpace($logPath)) { $message += "`r`n`r`n" + (T 'GuiErrorLogPath' 'Log: {0}' @($logPath)) }
     [Windows.Forms.MessageBox]::Show($message,'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error) | Out-Null
 }
 
@@ -1208,7 +1272,7 @@ function Get-ListItems {
 }
 function Apply-Prefs-ToConfig {
     $cfg=Read-Json $script:ConfigPath ([pscustomobject]@{})
-    $map=[ordered]@{Version='0.11.53';Language=[string]$script:Prefs.Language;SourceFolder=[string]$script:Prefs.SourceFolder;OutputFolder=[string]$script:Prefs.OutputFolder;DataFolder=[string]$script:Prefs.DataFolder;LogFolder=[string]$script:Prefs.LogFolder;ReportFolder=[string]$script:Prefs.ReportFolder;TempFolder=[string]$script:Prefs.TempFolder;FFmpegPath=[string]$script:Prefs.FFmpegPath;FFprobePath=[string]$script:Prefs.FFprobePath;MkvmergePath=[string]$script:Prefs.MkvmergePath;TVTargetMBPerMinute=[double]$script:Prefs.TVTargetMBPerMinute;MovieTargetMBPerMinute=[double]$script:Prefs.MovieTargetMBPerMinute;EncodeThresholdMultiplier=[double]$script:Prefs.EncodeThresholdMultiplier;MinimumSavingPercent=[double]$script:Prefs.MinimumSavingPercent;SelectedEncoderId=[string]$script:Prefs.SelectedEncoderId}
+    $map=[ordered]@{Version='0.11.54';Language=[string]$script:Prefs.Language;SourceFolder=[string]$script:Prefs.SourceFolder;OutputFolder=[string]$script:Prefs.OutputFolder;DataFolder=[string]$script:Prefs.DataFolder;LogFolder=[string]$script:Prefs.LogFolder;ReportFolder=[string]$script:Prefs.ReportFolder;TempFolder=[string]$script:Prefs.TempFolder;FFmpegPath=[string]$script:Prefs.FFmpegPath;FFprobePath=[string]$script:Prefs.FFprobePath;MkvmergePath=[string]$script:Prefs.MkvmergePath;TVTargetMBPerMinute=[double]$script:Prefs.TVTargetMBPerMinute;MovieTargetMBPerMinute=[double]$script:Prefs.MovieTargetMBPerMinute;UnknownMediaTargetProfile=[string]$script:Prefs.UnknownMediaTargetProfile;EncodeThresholdMultiplier=[double]$script:Prefs.EncodeThresholdMultiplier;MinimumSavingPercent=[double]$script:Prefs.MinimumSavingPercent;DefaultSubtitleCulture=[string]$script:Prefs.DefaultSubtitleCulture;SubtitleFilenameOverride=[bool]$script:Prefs.SubtitleFilenameOverride;SelectedEncoderId=[string]$script:Prefs.SelectedEncoderId}
     foreach($name in $map.Keys){$cfg|Add-Member -NotePropertyName $name -NotePropertyValue $map[$name] -Force}
     Write-Json $script:ConfigPath $cfg
 }
@@ -1731,7 +1795,7 @@ $title=New-Label 'MediaPrep MKV Toolkit' 32 10 390 43 25 $true;$title.ForeColor=
 $subtitle=New-Label (T 'AppSubtitleBase' 'Queue • UNC import • Muxing') 35 53 385 48 10 $false;$subtitle.ForeColor=$script:ThemePalette.BannerText;$header.Controls.Add($subtitle)
 # Process diagnostics are shown in two columns in the banner for better readability.
 $processLabel=New-Label '' 430 10 390 94 8.2 $false;$processLabel.ForeColor=$script:ThemePalette.BannerText;$processLabel.Font=New-Object Drawing.Font('Consolas',8.2);$header.Controls.Add($processLabel)
-$version=New-Label 'Start Center 3.3.53  |  MediaPrep MKV Toolkit 0.11.53' 820 18 390 22 9 $false;$version.TextAlign='MiddleRight';$version.ForeColor=$script:ThemePalette.BannerText;$version.Anchor='Top,Right';$header.Controls.Add($version)
+$version=New-Label 'Start Center 3.3.66  |  MediaPrep MKV Toolkit 0.11.54' 820 18 390 22 9 $false;$version.TextAlign='MiddleRight';$version.ForeColor=$script:ThemePalette.BannerText;$version.Anchor='Top,Right';$header.Controls.Add($version)
 $toolVersionLabel=New-Label '' 820 42 390 22 8.8 $false;$toolVersionLabel.TextAlign='MiddleRight';$toolVersionLabel.ForeColor=$script:ThemePalette.BannerText;$toolVersionLabel.Anchor='Top,Right';$header.Controls.Add($toolVersionLabel)
 $author=New-Label (T 'AuthorCredit' 'Created by Anders Syrén') 820 66 390 22 9 $false;$author.TextAlign='MiddleRight';$author.ForeColor=$script:ThemePalette.BannerText;$author.Anchor='Top,Right';$header.Controls.Add($author)
 
@@ -1853,6 +1917,19 @@ $movieRatio=New-OptionRatioNumeric 'MovieTargetMBPerMinute' 'Movie target MB per
 $movieExample=New-Label '' 435 64 360 28 9 $false;$movieExample.Anchor='Top,Left,Right';$criteriaGroup.Controls.Add($movieExample)
 $thresholdRatio=New-OptionRatioNumeric 'EncodeThresholdMultiplier' 'Encoding threshold multiplier' ([double]$script:Prefs.EncodeThresholdMultiplier) 1 5 2 0.05 100
 $minimumSaving=New-OptionRatioNumeric 'MinimumSavingPercent' 'Minimum estimated saving percent' ([double]$script:Prefs.MinimumSavingPercent) 0 95 0 1 136
+$unknownProfileLabel=New-Label (T 'UnknownMediaTargetProfile' 'Target profile for Other files') 435 103 205 27 9.5 $false
+$criteriaGroup.Controls.Add($unknownProfileLabel)
+$unknownProfile=New-Object Windows.Forms.ComboBox
+$unknownProfile.DropDownStyle=[Windows.Forms.ComboBoxStyle]::DropDownList
+$unknownProfile.Location=New-Object Drawing.Point(650,100)
+$unknownProfile.Size=New-Object Drawing.Size(145,27)
+$unknownProfile.Items.Add((T 'MediaTypeTV' 'TV series'))|Out-Null
+$unknownProfile.Items.Add((T 'MediaTypeFilm' 'Film'))|Out-Null
+$unknownProfile.SelectedIndex=if([string]$script:Prefs.UnknownMediaTargetProfile -eq 'TV'){0}else{1}
+$criteriaGroup.Controls.Add($unknownProfile)
+$unknownProfileHint=New-Label (T 'UnknownMediaTargetProfileHint' 'Used only when the filename is not recognized as TV series or film.') 435 132 360 40 8.7 $false
+$unknownProfileHint.ForeColor=$script:ThemePalette.Muted
+$criteriaGroup.Controls.Add($unknownProfileHint)
 
 $optionsGroup=New-Object Windows.Forms.GroupBox
 $optionsGroup.Text=T 'TabOptions' 'Options'
@@ -2107,7 +2184,7 @@ function Test-EncoderToolPreflight {
 function Invoke-EncoderCheck {
     if(-not(Test-EncoderToolPreflight)){return}
     if($script:QueueRunActive){[Windows.Forms.MessageBox]::Show((T 'EncoderCannotCheckWhileRunning' 'The CPU/GPU check cannot run while the queue is active.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Information)|Out-Null;return}
-    if(-not(Test-Path -LiteralPath $script:EncoderTestScript -PathType Leaf)){throw ('MediaPrep-Encoder-Test.ps1 saknas: '+$script:EncoderTestScript)}
+    if(-not(Test-Path -LiteralPath $script:EncoderTestScript -PathType Leaf)){throw (T 'EncoderTestScriptMissing' 'MediaPrep-Encoder-Test.ps1 is missing: {0}' @($script:EncoderTestScript))}
     Save-VisibleWorkList
     foreach($key in $script:PrefBoxes.Keys){$script:Prefs.$key=$script:PrefBoxes[$key].Text.Trim()}
     Write-Json $script:PreferencesPath $script:Prefs;Apply-Prefs-ToConfig
@@ -2117,7 +2194,7 @@ function Invoke-EncoderCheck {
     $encoderStatusLabel.Text=T 'EncoderChecking' 'Checking CPU/GPU and running benchmark...';$encoderStatusLabel.ForeColor=[Drawing.Color]::FromArgb(55,95,135)
     [Windows.Forms.Application]::DoEvents()
     try{
-        $argString='-NoProfile -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -BenchmarkSeconds {2}' -f $script:EncoderTestScript,$script:Root,[int]$script:Prefs.EncoderBenchmarkSeconds
+        $argString='-NoProfile -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -BenchmarkSeconds {2} -Language "{3}"' -f $script:EncoderTestScript,$script:Root,[int]$script:Prefs.EncoderBenchmarkSeconds,[string]$script:Prefs.Language
         $proc=Start-Process -FilePath 'powershell.exe' -ArgumentList $argString -WindowStyle Hidden -PassThru
         while(-not$proc.HasExited){
             $st=Read-Json -Path $script:EncoderTestStatusPath -Default $null
@@ -2481,7 +2558,7 @@ $toolManagerButton.Add_Click({
         return
     }
     $scriptPath=Join-Path $script:AppFolder 'Manage-MediaPrepTools.ps1'
-    if(-not(Test-Path -LiteralPath $scriptPath)){[Windows.Forms.MessageBox]::Show('Manage-MediaPrepTools.ps1 is missing.')|Out-Null;return}
+    if(-not(Test-Path -LiteralPath $scriptPath)){[Windows.Forms.MessageBox]::Show((T 'ToolManagerScriptMissing' 'Manage-MediaPrepTools.ps1 is missing.'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Error)|Out-Null;return}
     $language=[string]$script:Prefs.Language
     $toolProc=Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$scriptPath+'"'),'-Root',('"'+$script:Root+'"'),'-Language',$language) -Wait -PassThru
     $requestPath=Join-Path $script:Prefs.DataFolder 'mediaprep-update-request.json'
@@ -2556,6 +2633,124 @@ $bEncoderCheckFooter=$null
 $bStart=New-Object Windows.Forms.Button;$bStart.Text=T 'StartQueue' 'Start entire queue';$bStart.Location=New-Object Drawing.Point(925,780);$bStart.Size=New-Object Drawing.Size(190,42);$bStart.Anchor='Bottom,Right';$bStart.BackColor=[Drawing.Color]::FromArgb(23,112,77);$bStart.ForeColor=[Drawing.Color]::White;$bStart.Font=New-Object Drawing.Font('Segoe UI',10.5,[Drawing.FontStyle]::Bold);$bStart.Enabled=$false;$form.Controls.Add($bStart)
 $bClose=New-Object Windows.Forms.Button;$bClose.Text=T 'Close' 'Close';$bClose.Location=New-Object Drawing.Point(1130,780);$bClose.Size=New-Object Drawing.Size(95,42);$bClose.Anchor='Bottom,Right';$form.Controls.Add($bClose)
 
+function Get-QueueOptionKey {
+    param([string]$Path)
+    if([string]::IsNullOrWhiteSpace($Path)){return ''}
+    return $Path.TrimEnd('\').ToLowerInvariant()
+}
+function Get-UncQueueOption {
+    param([string]$Path)
+    $key=Get-QueueOptionKey $Path
+    if(-not[string]::IsNullOrWhiteSpace($key) -and $script:UncQueueOptions.ContainsKey($key)){return $script:UncQueueOptions[$key]}
+    return [pscustomobject]@{Path=$Path;SubtitleCulture=[string]$script:Prefs.DefaultSubtitleCulture;SubtitleFilenameOverride=[bool]$script:Prefs.SubtitleFilenameOverride}
+}
+function Set-UncQueueOption {
+    param([string]$Path,[string]$SubtitleCulture,[bool]$SubtitleFilenameOverride=$true)
+    $key=Get-QueueOptionKey $Path
+    if([string]::IsNullOrWhiteSpace($key)){return}
+    $culture=if([string]::IsNullOrWhiteSpace($SubtitleCulture)){[string]$script:Prefs.DefaultSubtitleCulture}else{$SubtitleCulture}
+    $script:UncQueueOptions[$key]=[pscustomobject][ordered]@{Path=$Path;SubtitleCulture=$culture;SubtitleFilenameOverride=[bool]$SubtitleFilenameOverride}
+}
+function Remove-UncQueueOption {
+    param([string]$Path)
+    $key=Get-QueueOptionKey $Path
+    if(-not[string]::IsNullOrWhiteSpace($key)){[void]$script:UncQueueOptions.Remove($key)}
+}
+function Get-UncQueueOptionsArray {
+    param([string[]]$Paths=@())
+    $result=New-Object System.Collections.Generic.List[object]
+    foreach($path in @($Paths)){
+        if([string]::IsNullOrWhiteSpace([string]$path)){continue}
+        $option=Get-UncQueueOption -Path ([string]$path)
+        $result.Add([pscustomobject][ordered]@{Path=[string]$path;SubtitleCulture=[string]$option.SubtitleCulture;SubtitleFilenameOverride=[bool]$option.SubtitleFilenameOverride})
+    }
+    return @($result.ToArray())
+}
+function Restore-UncQueueOptions {
+    param([object]$Settings)
+    $script:UncQueueOptions=@{}
+    foreach($entry in @((P $Settings 'UncQueueOptions' @()))){
+        $path=[string](P $entry 'Path' '')
+        if([string]::IsNullOrWhiteSpace($path)){continue}
+        Set-UncQueueOption -Path $path -SubtitleCulture ([string](P $entry 'SubtitleCulture' ([string]$script:Prefs.DefaultSubtitleCulture))) -SubtitleFilenameOverride ([bool](P $entry 'SubtitleFilenameOverride' ([bool]$script:Prefs.SubtitleFilenameOverride)))
+    }
+}
+function Get-SubtitleLanguageChoices {
+    $choices=New-Object System.Collections.Generic.List[object]
+    foreach($entry in @(Get-InstalledLanguageDocuments | Sort-Object {[string](P -Object $_.Document -Name 'NativeName' -Default $_.Culture)})){
+        $culture=[string]$entry.Culture
+        $display=[string](P $entry.Document 'NativeName' (P $entry.Document 'LanguageName' $culture))
+        try{$ci=[Globalization.CultureInfo]::GetCultureInfo($culture);$iso3=[string]$ci.ThreeLetterISOLanguageName}catch{$iso3='und'}
+        $choices.Add([pscustomobject]@{Culture=$culture;Display=$display;Iso3=$iso3})
+    }
+    return @($choices.ToArray())
+}
+
+function Get-QueueFolderSubtitlePromptInfo {
+    param(
+        [Parameter(Mandatory=$true)][string]$Folder,
+        [string[]]$SelectedFormats=@()
+    )
+    $result=[pscustomobject][ordered]@{HasMatchingSubtitles=$false;NeedsLanguagePrompt=$false;MatchingSubtitleCount=0;UntaggedSubtitleCount=0}
+    if([string]::IsNullOrWhiteSpace($Folder) -or -not(Test-Path -LiteralPath $Folder -PathType Container)){return $result}
+    $formats=@($SelectedFormats|ForEach-Object{([string]$_).ToLowerInvariant()}|Where-Object{-not[string]::IsNullOrWhiteSpace($_)}|Select-Object -Unique)
+    if($formats.Count-eq0){return $result}
+    $aliases=@{}
+    foreach($choice in @(Get-SubtitleLanguageChoices)){
+        try{
+            $ci=[Globalization.CultureInfo]::GetCultureInfo([string]$choice.Culture)
+            foreach($a in @($ci.TwoLetterISOLanguageName,$ci.ThreeLetterISOLanguageName,$ci.Name)){
+                if(-not[string]::IsNullOrWhiteSpace([string]$a)){$aliases[([string]$a).ToLowerInvariant()]=$true}
+            }
+            switch($ci.ThreeLetterISOLanguageName.ToLowerInvariant()){
+                'deu'{$aliases['ger']=$true}
+                'fra'{$aliases['fre']=$true}
+                'nld'{$aliases['dut']=$true}
+                'nob'{$aliases['no']=$true;$aliases['nor']=$true}
+                'isl'{$aliases['ice']=$true}
+                'zho'{$aliases['chi']=$true}
+            }
+        }catch{}
+    }
+    $videos=@{}
+    $subtitles=New-Object System.Collections.Generic.List[object]
+    try{
+        foreach($file in @(Get-ChildItem -LiteralPath $Folder -File -Recurse -ErrorAction Stop)){
+            $ext=$file.Extension.ToLowerInvariant()
+            $dir=([string]$file.DirectoryName).TrimEnd('\').ToLowerInvariant()
+            if($formats -contains $ext){
+                $key=$dir+'|'+([string]$file.BaseName).ToLowerInvariant()
+                $videos[$key]=$true
+            }elseif($ext -in @('.srt','.vtt')){
+                $subtitles.Add($file)
+            }
+        }
+    }catch{return $result}
+    foreach($subtitle in $subtitles.ToArray()){
+        $dir=([string]$subtitle.DirectoryName).TrimEnd('\').ToLowerInvariant()
+        $subtitleBase=[string]$subtitle.BaseName
+        $exactKey=$dir+'|'+$subtitleBase.ToLowerInvariant()
+        if($videos.ContainsKey($exactKey)){
+            $result.HasMatchingSubtitles=$true
+            $result.NeedsLanguagePrompt=$true
+            $result.MatchingSubtitleCount=[int]$result.MatchingSubtitleCount+1
+            $result.UntaggedSubtitleCount=[int]$result.UntaggedSubtitleCount+1
+            continue
+        }
+        $dot=$subtitleBase.LastIndexOf('.')
+        if($dot-le0 -or $dot-ge($subtitleBase.Length-1)){continue}
+        $videoBase=$subtitleBase.Substring(0,$dot)
+        $suffix=$subtitleBase.Substring($dot+1).ToLowerInvariant()
+        if(-not $aliases.ContainsKey($suffix)){continue}
+        $taggedKey=$dir+'|'+$videoBase.ToLowerInvariant()
+        if($videos.ContainsKey($taggedKey)){
+            $result.HasMatchingSubtitles=$true
+            $result.MatchingSubtitleCount=[int]$result.MatchingSubtitleCount+1
+        }
+    }
+    return $result
+}
+
 function Get-CurrentSettings {
     $mode='Full';if($rAnalyze.Checked){$mode='AnalyzeOnly'}elseif($rEncode.Checked){$mode='EncodeOnly'}
     $workMode=if($rAll.Checked){'AllInOne'}else{'Queue'}
@@ -2567,10 +2762,14 @@ function Get-CurrentSettings {
             -not[string]::IsNullOrWhiteSpace($ext) -and ($selectedVideoFormats -contains $ext.ToLowerInvariant())
         })
     }
+    $uncQueueItems=if($workMode -eq 'Queue'){@(Get-ListItems $queueList)}else{@($script:UncItems)}
+    $uncQueueOptionItems=@(Get-UncQueueOptionsArray -Paths $uncQueueItems)
     return [pscustomobject][ordered]@{
         Mode=$mode;WorkMode=$workMode;NoConfirm=[bool]$cMux.Checked;EnableEncoding=[bool]$cEncode.Checked;EncodeRecommended=[bool]$cEncode.Checked;Force=[bool]$cForce.Checked;
         Reanalyze=[bool]$cReanalyze.Checked;RebuildIndex=[bool]$cRebuild.Checked;NoPause=[bool]$cCloseConsole.Checked;
-        UncEnabled=($workMode -eq 'Queue');UncQueue=if($workMode -eq 'Queue'){@(Get-ListItems $queueList)}else{@($script:UncItems)};
+        UncEnabled=($workMode -eq 'Queue');UncQueue=@($uncQueueItems);
+        UncQueueOptions=@($uncQueueOptionItems);
+        DefaultSubtitleCulture=[string]$script:Prefs.DefaultSubtitleCulture;SubtitleFilenameOverride=[bool]$script:Prefs.SubtitleFilenameOverride;
         LocalFileQueue=@($localQueueItems);TemporarySourceFolder=$tempSource.Text.Trim();TemporaryOutputFolder=$tempOutput.Text.Trim();
         DeleteUncAfterSuccess=[bool]$cDelete.Checked;ShutdownAfterSuccess=[bool]$cShutdown.Checked;PreventSleep=[bool]$cSleep.Checked;
         PreventUpdateRestart=[bool]$cUpdates.Checked;VerboseLogging=[bool]$cVerbose.Checked;IgnoreDecodeErrors=[bool]$cIgnoreDecodeErrors.Checked;ProcessErrorQueue=[bool]$cProcessErrorQueue.Checked;EncoderId=[string]$script:Prefs.SelectedEncoderId;VideoFormats=@($selectedVideoFormats)
@@ -2589,7 +2788,11 @@ function Apply-Settings {
     if([string]::IsNullOrWhiteSpace($savedTempOutput)){$savedTempOutput=[string]$script:Prefs.OutputFolder}
     $tempSource.Text=$savedTempSource
     $tempOutput.Text=$savedTempOutput
+    $script:Prefs.DefaultSubtitleCulture=[string](P $Settings 'DefaultSubtitleCulture' ([string]$script:Prefs.DefaultSubtitleCulture))
+    if([string]::IsNullOrWhiteSpace([string]$script:Prefs.DefaultSubtitleCulture)){$script:Prefs.DefaultSubtitleCulture='en-US'}
+    $script:Prefs.SubtitleFilenameOverride=[bool](P $Settings 'SubtitleFilenameOverride' ([bool]$script:Prefs.SubtitleFilenameOverride))
     $script:UncItems=@(P $Settings 'UncQueue' @());$script:LocalItems=@(P $Settings 'LocalFileQueue' @())
+    Restore-UncQueueOptions -Settings $Settings
     $script:LastWorkMode=$null
 }
 function Get-PersistedPreventUpdateRestart {
@@ -2621,6 +2824,7 @@ function Save-Options {
     Write-Json $script:SettingsPath $script:Settings
     $script:Prefs.TVTargetMBPerMinute=[double]$tvRatio.Value
     $script:Prefs.MovieTargetMBPerMinute=[double]$movieRatio.Value
+    $script:Prefs.UnknownMediaTargetProfile=if($unknownProfile.SelectedIndex -eq 0){'TV'}else{'Film'}
     $script:Prefs.EncodeThresholdMultiplier=[double]$thresholdRatio.Value
     $script:Prefs.MinimumSavingPercent=[double]$minimumSaving.Value
     Write-Json $script:PreferencesPath $script:Prefs
@@ -2824,6 +3028,34 @@ function Set-QueueStatisticsDisplay {
     [Windows.Forms.Application]::DoEvents()
 }
 
+function Get-MatchingSubtitleFilesForQueueDisplay {
+    param([System.IO.FileInfo]$Video)
+    if($null-eq$Video){return @()}
+    $aliases=@{}
+    foreach($choice in @(Get-SubtitleLanguageChoices)){
+        try{
+            $ci=[Globalization.CultureInfo]::GetCultureInfo([string]$choice.Culture)
+            foreach($a in @($ci.TwoLetterISOLanguageName,$ci.ThreeLetterISOLanguageName,$ci.Name)){if($a){$aliases[$a.ToLowerInvariant()]=$true}}
+            switch($ci.ThreeLetterISOLanguageName.ToLowerInvariant()){
+                'deu'{$aliases['ger']=$true}
+                'fra'{$aliases['fre']=$true}
+                'nld'{$aliases['dut']=$true}
+                'nob'{$aliases['no']=$true;$aliases['nor']=$true}
+                'isl'{$aliases['ice']=$true}
+                'zho'{$aliases['chi']=$true}
+            }
+        }catch{}
+    }
+    $base=[string]$Video.BaseName;$prefix=$base+'.'
+    return @(Get-ChildItem -LiteralPath $Video.DirectoryName -File -ErrorAction SilentlyContinue | Where-Object {
+        if($_.Extension.ToLowerInvariant() -notin @('.srt','.vtt')){return $false}
+        if([string]::Equals([string]$_.BaseName,$base,[StringComparison]::OrdinalIgnoreCase)){return $true}
+        if(-([string]$_.BaseName).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){return $false}
+        $suffix=([string]$_.BaseName).Substring($prefix.Length).ToLowerInvariant()
+        return $aliases.ContainsKey($suffix)
+    })
+}
+
 function Update-AllInOneStatistics {
     $queueStatsPanel.Visible=$true
     $files=@(Get-ListItems $queueList)
@@ -2837,7 +3069,7 @@ function Update-AllInOneStatistics {
                 $fi=Get-Item -LiteralPath ([string]$filePath) -ErrorAction Stop
                 $bytes += [double]$fi.Length
                 $base=[IO.Path]::GetFileNameWithoutExtension($fi.Name)
-                $subs += @(Get-ChildItem -LiteralPath $fi.DirectoryName -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq $base -and $_.Extension.ToLowerInvariant() -in @('.srt','.vtt') }).Count
+                $subs += @(Get-MatchingSubtitleFilesForQueueDisplay -Video $fi).Count
             }
         }catch{}
     }
@@ -2848,6 +3080,84 @@ function Update-AllInOneStatistics {
         if(Test-Path -LiteralPath $out -PathType Container){$ready=@(Get-ChildItem -LiteralPath $out -File -Recurse -Filter '*.mkv' -ErrorAction SilentlyContinue).Count}
     }catch{}
     Set-QueueStatisticsDisplay -Remaining $total -Processed 0 -Total $total -RemainingBytes $bytes -Ready $ready -Subtitles $subs -AllInOne
+}
+
+function Build-AllInOneStatisticsInventory {
+    param(
+        [string[]]$Files=@(),
+        [string]$SourceRoot='',
+        [string]$OutputRoot=''
+    )
+    $inventory=New-Object System.Collections.Generic.List[object]
+    foreach($filePath in @($Files)){
+        $sourcePath=[string]$filePath
+        if([string]::IsNullOrWhiteSpace($sourcePath) -or -not(Test-Path -LiteralPath $sourcePath -PathType Leaf)){continue}
+        try{
+            $video=Get-Item -LiteralPath $sourcePath -ErrorAction Stop
+            $relative=$video.Name
+            if(-not[string]::IsNullOrWhiteSpace($SourceRoot)){
+                try{$relative=Get-QueueRelativePath -RootPath $SourceRoot -FullName $video.FullName}catch{$relative=$video.Name}
+            }
+            $relativeMkv=[IO.Path]::ChangeExtension($relative,'.mkv')
+            $localOutput=if(-not[string]::IsNullOrWhiteSpace($OutputRoot)){Join-Path $OutputRoot $relativeMkv}else{''}
+            $subtitleCount=0
+            try{
+                $base=[IO.Path]::GetFileNameWithoutExtension($video.Name)
+                $subtitleCount=@(Get-MatchingSubtitleFilesForQueueDisplay -Video $video).Count
+            }catch{}
+            $inventory.Add([pscustomobject][ordered]@{
+                Root='Local / All in one'
+                RelativePath=$relative
+                SourcePath=$video.FullName
+                SourceSize=[int64]$video.Length
+                MuxedSize=$null
+                EncodedSize=$null
+                FinalSize=$null
+                LocalSource=$video.FullName
+                LocalOutput=$localOutput
+                SubtitleCount=[int]$subtitleCount
+                MediaType=''
+                MediaDetectionReason=''
+                TargetProfile=''
+                DurationMinutes=0
+                CurrentMBPerMinute=0
+                TargetMBPerMinute=0
+                ThresholdMBPerMinute=0
+                TargetSizeMB=0
+                EstimatedSavingMB=0
+                EstimatedSavingPercent=0
+                Recommended=$false
+                QueueStage=0
+                QueueStatus='Waiting'
+                CopyInStarted=$null
+                CopyInCompleted=$null
+                MuxStarted=$null
+                MuxCompleted=$null
+                AnalysisCompleted=$null
+                EncodeStarted=$null
+                EncodeCompleted=$null
+                CopyBackStarted=$null
+                CopyBackCompleted=$null
+                CompletedUtc=$null
+                ErrorMessage=$null
+                UpdatedUtc=(Get-Date).ToUniversalTime().ToString('o')
+            })
+        }catch{}
+    }
+    $errorQueuePath=Join-Path $script:Prefs.DataFolder 'error-queue.json'
+    $errorCount=0
+    try{if(Test-Path -LiteralPath $errorQueuePath -PathType Leaf){$errorCount=@(Read-Json $errorQueuePath @()).Count}}catch{}
+    Write-Json $script:QueueInventoryPath ([pscustomobject][ordered]@{
+        version=4
+        workMode='AllInOne'
+        stageMap=[ordered]@{
+            '0'='Waiting';'1'='CopyingFromUNC';'2'='LocalSourceReady';'3'='Muxing';'4'='Muxed';'5'='Analyzed';'6'='Encoding';'7'='Encoded';'8'='WaitingForReturn';'9'='CopyingToUNC';'10'='Completed';'90'='Error';'91'='ProcessingErrorQueue';'92'='ErrorQueueFailed'
+        }
+        updatedUtc=(Get-Date).ToUniversalTime().ToString('o')
+        errors=[int]$errorCount
+        items=@($inventory.ToArray())
+    })
+    $script:StatsProcessedSeen=@{}
 }
 
 function Build-QueueStatisticsInventory {
@@ -2876,7 +3186,7 @@ function Build-QueueStatisticsInventory {
                     $subtitleCount=0
                     try{
                         $base=[IO.Path]::GetFileNameWithoutExtension($video.Name)
-                        $subtitleCount=@(Get-ChildItem -LiteralPath $video.DirectoryName -File -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq $base -and $_.Extension.ToLowerInvariant() -in @('.srt','.vtt') }).Count
+                        $subtitleCount=@(Get-MatchingSubtitleFilesForQueueDisplay -Video $video).Count
                     }catch{}
                     $inventory.Add([pscustomobject][ordered]@{
                         Root=$rootValue
@@ -2889,6 +3199,17 @@ function Build-QueueStatisticsInventory {
                         LocalSource=$localSource
                         LocalOutput=$localOutput
                         SubtitleCount=[int]$subtitleCount
+                        MediaType=''
+                        MediaDetectionReason=''
+                        TargetProfile=''
+                        DurationMinutes=0
+                        CurrentMBPerMinute=0
+                        TargetMBPerMinute=0
+                        ThresholdMBPerMinute=0
+                        TargetSizeMB=0
+                        EstimatedSavingMB=0
+                        EstimatedSavingPercent=0
+                        Recommended=$false
                         QueueStage=0
                         QueueStatus='Waiting'
                         CopyInStarted=$null
@@ -2920,7 +3241,7 @@ function Build-QueueStatisticsInventory {
     $errorCount=0
     try{if(Test-Path -LiteralPath $errorQueuePath -PathType Leaf){$errorCount=@(Read-Json $errorQueuePath @()).Count}}catch{}
     Write-Json $script:QueueInventoryPath ([pscustomobject][ordered]@{
-        version=3
+        version=4
         stageMap=[ordered]@{
             '0'='Waiting';'1'='CopyingFromUNC';'2'='LocalSourceReady';'3'='Muxing';'4'='Muxed';'5'='Analyzed';'6'='Encoding';'7'='Encoded';'8'='WaitingForReturn';'9'='CopyingToUNC';'10'='Completed';'90'='Error';'91'='ProcessingErrorQueue';'92'='ErrorQueueFailed'
         }
@@ -2935,7 +3256,8 @@ function Build-QueueStatisticsInventory {
 function Update-QueueStatistics {
     param([switch]$Force)
     $queueStatsPanel.Visible=$true
-    if($rAll.Checked){Update-AllInOneStatistics;return}
+    $allInOneLive=($rAll.Checked -and $script:QueueRunActive -and (Test-Path -LiteralPath $script:QueueInventoryPath -PathType Leaf))
+    if($rAll.Checked -and -not $allInOneLive){Update-AllInOneStatistics;return}
     if(-not $Force -and ((Get-Date)-$script:LastStatsRefresh).TotalSeconds -lt 1.2){return}
     $script:LastStatsRefresh=Get-Date
     if(-not(Test-Path -LiteralPath $script:QueueInventoryPath -PathType Leaf)){
@@ -2960,7 +3282,7 @@ function Update-QueueStatistics {
         else{$remainingBytes += [double]$item.SourceSize}
         $subs += [int]$item.SubtitleCount
     }
-    Set-QueueStatisticsDisplay -Remaining $remaining -Processed $processed -Total $total -RemainingBytes $remainingBytes -Ready $ready -Subtitles $subs
+    Set-QueueStatisticsDisplay -Remaining $remaining -Processed $processed -Total $total -RemainingBytes $remainingBytes -Ready $ready -Subtitles $subs -AllInOne:$rAll.Checked
 }
 
 function Update-Dashboard {
@@ -3020,6 +3342,9 @@ function Save-VisibleWorkList {
         $saved = Read-Json $script:SettingsPath $null
         if ($null -ne $saved) {
             $saved.UncQueue = @($items)
+            if($saved.PSObject.Properties['UncQueueOptions']){$saved.UncQueueOptions=@(Get-UncQueueOptionsArray -Paths $items)}else{$saved|Add-Member -NotePropertyName UncQueueOptions -NotePropertyValue @(Get-UncQueueOptionsArray -Paths $items)}
+            if($saved.PSObject.Properties['DefaultSubtitleCulture']){$saved.DefaultSubtitleCulture=[string]$script:Prefs.DefaultSubtitleCulture}else{$saved|Add-Member -NotePropertyName DefaultSubtitleCulture -NotePropertyValue ([string]$script:Prefs.DefaultSubtitleCulture)}
+            if($saved.PSObject.Properties['SubtitleFilenameOverride']){$saved.SubtitleFilenameOverride=[bool]$script:Prefs.SubtitleFilenameOverride}else{$saved|Add-Member -NotePropertyName SubtitleFilenameOverride -NotePropertyValue ([bool]$script:Prefs.SubtitleFilenameOverride)}
             Write-Json $script:SettingsPath $saved
         }
         if(-not $script:QueueRunActive){Build-QueueStatisticsInventory}
@@ -3070,6 +3395,33 @@ function Load-QueuePackageInteractive {
     finally{Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue;$dlg.Dispose()}
 }
 
+function Show-QueueFolderOptionsDialog {
+    param([Parameter(Mandatory=$true)][string]$Folder)
+    $existing=Get-UncQueueOption -Path $Folder
+    $d=New-Object Windows.Forms.Form
+    $d.Text=T 'QueueFolderOptionsTitle' 'Folder options'
+    $d.StartPosition='CenterParent';$d.FormBorderStyle='FixedDialog';$d.MaximizeBox=$false;$d.MinimizeBox=$false;$d.ShowInTaskbar=$false
+    $d.ClientSize=New-Object Drawing.Size(520,225);$d.Font=New-Object Drawing.Font('Segoe UI',9)
+    $folderLabel=New-Object Windows.Forms.Label;$folderLabel.Text=T 'QueueFolderOptionsFolder' 'Folder:';$folderLabel.Location=New-Object Drawing.Point(18,18);$folderLabel.Size=New-Object Drawing.Size(90,22);$d.Controls.Add($folderLabel)
+    $folderText=New-Object Windows.Forms.TextBox;$folderText.Location=New-Object Drawing.Point(110,15);$folderText.Size=New-Object Drawing.Size(390,27);$folderText.ReadOnly=$true;$folderText.Text=$Folder;$d.Controls.Add($folderText)
+    $langLabel=New-Object Windows.Forms.Label;$langLabel.Text=T 'SubtitleLanguageForFolder' 'Subtitle language';$langLabel.Location=New-Object Drawing.Point(18,62);$langLabel.Size=New-Object Drawing.Size(165,24);$d.Controls.Add($langLabel)
+    $combo=New-Object Windows.Forms.ComboBox;$combo.DropDownStyle='DropDownList';$combo.Location=New-Object Drawing.Point(190,58);$combo.Size=New-Object Drawing.Size(310,29);$d.Controls.Add($combo)
+    foreach($choice in @(Get-SubtitleLanguageChoices)){[void]$combo.Items.Add($choice)};$combo.DisplayMember='Display'
+    for($i=0;$i-lt$combo.Items.Count;$i++){if([string]$combo.Items[$i].Culture -ieq [string]$existing.SubtitleCulture){$combo.SelectedIndex=$i;break}}
+    if($combo.SelectedIndex-lt0 -and $combo.Items.Count-gt0){$combo.SelectedIndex=0}
+    $override=New-Object Windows.Forms.CheckBox;$override.Text=T 'SubtitleFilenameOverride' 'Let the language code in the subtitle filename override this choice';$override.Location=New-Object Drawing.Point(18,105);$override.Size=New-Object Drawing.Size(482,28);$override.Checked=[bool]$existing.SubtitleFilenameOverride;$d.Controls.Add($override)
+    $hint=New-Object Windows.Forms.Label;$hint.Text=T 'SubtitleFilenameOverrideHint' 'Example: Series 1x02.en.srt = English, Series 1x02.sv.srt = Swedish.';$hint.Location=New-Object Drawing.Point(38,134);$hint.Size=New-Object Drawing.Size(462,35);$hint.ForeColor=[Drawing.Color]::DimGray;$d.Controls.Add($hint)
+    $ok=New-Object Windows.Forms.Button;$ok.Text=T 'OK' 'OK';$ok.Location=New-Object Drawing.Point(330,180);$ok.Size=New-Object Drawing.Size(80,32);$ok.DialogResult=[Windows.Forms.DialogResult]::OK;$d.Controls.Add($ok)
+    $cancel=New-Object Windows.Forms.Button;$cancel.Text=T 'Cancel' 'Cancel';$cancel.Location=New-Object Drawing.Point(420,180);$cancel.Size=New-Object Drawing.Size(80,32);$cancel.DialogResult=[Windows.Forms.DialogResult]::Cancel;$d.Controls.Add($cancel)
+    $d.AcceptButton=$ok;$d.CancelButton=$cancel
+    try{Apply-ControlTheme $d}catch{}
+    $result=$d.ShowDialog($form)
+    if($result-ne[Windows.Forms.DialogResult]::OK){$d.Dispose();return $null}
+    if($null-eq$combo.SelectedItem){$d.Dispose();return $null}
+    $value=[pscustomobject]@{Path=$Folder;SubtitleCulture=[string]$combo.SelectedItem.Culture;SubtitleFilenameOverride=[bool]$override.Checked}
+    $d.Dispose();return $value
+}
+
 function Load-WorkItems {
     if($rAll.Checked){
         $folder=$tempSource.Text.Trim();if([string]::IsNullOrWhiteSpace($folder) -or -not(Test-Path -LiteralPath $folder -PathType Container)){throw(T 'TemporarySource' 'Temporary source folder')}
@@ -3082,13 +3434,40 @@ function Load-WorkItems {
         $folder=Select-Folder ''
         if($folder){
             $folder=$folder.TrimEnd('\')
+            $selectedFormats=@(Get-SelectedVideoFormatsFromUi)
+            $subtitlePrompt=Get-QueueFolderSubtitlePromptInfo -Folder $folder -SelectedFormats $selectedFormats
+            $folderOptions=$null
+            if([bool]$subtitlePrompt.NeedsLanguagePrompt){
+                # Ask once for the whole folder only when at least one matching subtitle
+                # has no explicit language suffix. The selected language applies to every
+                # such subtitle in this queue folder.
+                $folderOptions=Show-QueueFolderOptionsDialog -Folder $folder
+                if($null-eq$folderOptions){return}
+            }else{
+                # No matching subtitles, or every matching subtitle already has an
+                # explicit language code such as .en/.eng/.sv/.swe. Do not interrupt the
+                # user with a language question. Explicit filename codes must win.
+                $existing=Get-UncQueueOption -Path $folder
+                $folderOptions=[pscustomobject]@{
+                    Path=$folder
+                    SubtitleCulture=[string]$existing.SubtitleCulture
+                    SubtitleFilenameOverride=$true
+                }
+            }
+            Set-UncQueueOption -Path $folder -SubtitleCulture ([string]$folderOptions.SubtitleCulture) -SubtitleFilenameOverride ([bool]$folderOptions.SubtitleFilenameOverride)
             if(-not $queueList.Items.Contains($folder)){
                 [void]$queueList.Items.Add($folder)
                 $queueList.SelectedIndex=$queueList.Items.Count-1
             }
-            # Save immediately. Otherwise the refresh timer reads the old
-            # queue from settings.json and the newly added folder disappears.
             Save-VisibleWorkList
+            if([bool]$subtitlePrompt.NeedsLanguagePrompt){
+                $displayCulture=[string]$folderOptions.SubtitleCulture
+                foreach($choice in @(Get-SubtitleLanguageChoices)){if([string]$choice.Culture -ieq $displayCulture){$displayCulture=[string]$choice.Display;break}}
+                $status.Text=T 'QueueFolderAddedWithSubtitleLanguage' 'Folder ready in queue. Subtitle language: {0}.' @($displayCulture)
+            }else{
+                $status.Text=T 'QueueFolderAdded' 'Folder ready in queue.'
+            }
+            $status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
         }
     }
     Update-Dashboard
@@ -3143,7 +3522,7 @@ function Show-QueueDashboard {
             try{Add-Content -LiteralPath (Join-Path $script:Prefs.LogFolder 'MediaPrep-Queue-Dashboard-Launcher.log') -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')+' [INFO] '+$dashboardArgs) -Encoding UTF8}catch{}
         }
         $proc=Start-Process -FilePath 'powershell.exe' -ArgumentList $dashboardArgs -WorkingDirectory $script:Root -PassThru -ErrorAction Stop
-        if($null -eq $proc){throw 'The queue statistics process could not be started.'}
+        if($null -eq $proc){throw (T 'QueueStatisticsProcessStartFailed' 'The queue statistics process could not be started.')}
         $script:QueueDashboardProcess=$proc
         $status.Text=T 'QueueDashboardOpened' 'Queue statistics opened (PID {0}).' @($proc.Id)
         $status.ForeColor=[Drawing.Color]::FromArgb(23,112,77)
@@ -3255,6 +3634,7 @@ function Start-Queue {
         if(-not(Test-Path -LiteralPath $job.TemporarySourceFolder -PathType Container)){throw(T 'TemporarySource' 'Temporary source folder')}
         if(-not(Test-Path -LiteralPath $job.TemporaryOutputFolder -PathType Container)){New-Item -Path $job.TemporaryOutputFolder -ItemType Directory -Force|Out-Null}
         $includePath=Join-Path $script:Prefs.DataFolder 'all-in-one-files.json';Write-Json $includePath @($job.LocalFileQueue);$job|Add-Member IncludeListPath $includePath -Force
+        Build-AllInOneStatisticsInventory -Files @($job.LocalFileQueue) -SourceRoot ([string]$job.TemporarySourceFolder) -OutputRoot ([string]$job.TemporaryOutputFolder)
     }
     if($job.ShutdownAfterSuccess){$answer=[Windows.Forms.MessageBox]::Show((T 'ConfirmShutdown' 'The computer will shut down after the entire queue completes without errors. Continue?'),'MediaPrep',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Warning);if($answer -ne [Windows.Forms.DialogResult]::Yes){return}}
     Start-StatisticsRun -QueueRoots $(if($job.WorkMode -eq 'Queue'){@($job.UncQueue)}else{@('Local / All in one')}) -RunStart $runRequestedAt
@@ -3262,7 +3642,7 @@ function Start-Queue {
     $stamp=Get-Date -Format 'yyyy-MM-dd_HH-mm-ss';$queueLog=Join-Path $script:Prefs.LogFolder ("MediaPrep-Queue_{0}.log" -f $stamp);$job|Add-Member QueueLogPath $queueLog -Force
     Write-Json $script:SettingsPath $job;Write-Json $script:JobPath $job
     $startInfo=New-Object Diagnostics.ProcessStartInfo;$startInfo.FileName='powershell.exe';$startInfo.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$script:QueueHost+'" -JobFile "'+$script:JobPath+'" -LogFile "'+$queueLog+'"';$startInfo.WorkingDirectory=$script:Root;$startInfo.UseShellExecute=$true
-    $script:QueueProcess=[Diagnostics.Process]::Start($startInfo);if($null -eq $script:QueueProcess){throw 'Queue process could not be started.'};Set-RunState $true;$tabs.SelectedTab=$tabDash
+    $script:QueueProcess=[Diagnostics.Process]::Start($startInfo);if($null -eq $script:QueueProcess){throw (T 'QueueProcessStartFailed' 'Queue process could not be started.')};Set-RunState $true;$tabs.SelectedTab=$tabDash
     [Windows.Forms.Application]::DoEvents()
     [void](Show-QueueDashboard)
 }
@@ -3275,7 +3655,9 @@ $bRemove.Add_Click({
     try {
         $selectedIndex = [int]$queueList.SelectedIndex
         if ($selectedIndex -ge 0) {
+            $removedPath=[string]$queueList.Items[$selectedIndex]
             $queueList.Items.RemoveAt($selectedIndex)
+            if(-not$rAll.Checked){Remove-UncQueueOption -Path $removedPath}
             $remainingCount = @($queueList.Items).Count
             if ($remainingCount -gt 0) {
                 $queueList.SelectedIndex = [Math]::Min($selectedIndex, $remainingCount - 1)

@@ -1,8 +1,11 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
 param(
     [string]$Root = (Split-Path -Parent $PSScriptRoot),
-    [int]$BenchmarkSeconds = 12
+    [int]$BenchmarkSeconds = 12,
+    [string]$Language = 'system'
 )
 
 Set-StrictMode -Version 2.0
@@ -37,6 +40,52 @@ function Read-JsonFile {
     try { return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json) }
     catch { return $null }
 }
+
+$script:EncoderLanguageBase=$null
+$script:EncoderLanguage=$null
+function Normalize-EncoderLanguage([string]$Code){
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'}
+    $v=$Code.Trim()
+    switch($v.ToLowerInvariant()){
+        'system'{return 'system'}
+        'default'{return 'system'}
+        'en'{return 'en-US'}
+        'english'{return 'en-US'}
+        'sv'{return 'sv-SE'}
+        'svenska'{return 'sv-SE'}
+    }
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($v)).Name}catch{return $v}
+}
+function Get-EncoderLanguageDocument([string]$Code){
+    $folder=Join-Path $Root 'Languages'
+    $path=Join-Path $folder ('mediaprep.'+$Code+'.json')
+    if(Test-Path -LiteralPath $path -PathType Leaf){return (Read-JsonFile $path)}
+    try{
+        $requested=[Globalization.CultureInfo]::GetCultureInfo($Code)
+        foreach($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+            if($file.Name -notmatch '^mediaprep\.(.+)\.json$'){continue}
+            try{$candidate=[Globalization.CultureInfo]::GetCultureInfo($Matches[1]);if($candidate.TwoLetterISOLanguageName -ieq $requested.TwoLetterISOLanguageName){return (Read-JsonFile $file.FullName)}}catch{}
+        }
+    }catch{}
+    return $null
+}
+function Initialize-EncoderLanguage {
+    $script:EncoderLanguageBase=Get-EncoderLanguageDocument 'en-US'
+    $requested=Normalize-EncoderLanguage $Language
+    if($requested-eq'system'){$requested=[Globalization.CultureInfo]::CurrentUICulture.Name}
+    $script:EncoderLanguage=Get-EncoderLanguageDocument $requested
+    if($null-eq$script:EncoderLanguage){$script:EncoderLanguage=$script:EncoderLanguageBase}
+}
+function T([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@()){
+    $bp=if($script:EncoderLanguageBase){$script:EncoderLanguageBase.PSObject.Properties[$Key]}else{$null}
+    $base=if($bp -and -not[string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p=if($script:EncoderLanguage){$script:EncoderLanguage.PSObject.Properties[$Key]}else{$null}
+    $value=if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $safeArgs=@($FormatArgs)
+    if($safeArgs.Count-gt0){try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$safeArgs)}catch{};try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$safeArgs)}catch{return $Fallback}}
+    return $value
+}
+Initialize-EncoderLanguage
 
 function Write-JsonAtomic {
     param([string]$Path,[object]$Value,[int]$Depth=12)
@@ -125,7 +174,7 @@ function Invoke-NativeCapture {
         $psi.StandardErrorEncoding=[Text.Encoding]::UTF8
         $process=New-Object Diagnostics.Process
         $process.StartInfo=$psi
-        if (-not $process.Start()) { throw "Could not start: $FilePath" }
+        if (-not $process.Start()) { throw (T 'EncoderTestProcessCouldNotStart' 'Could not start: {0}' @($FilePath)) }
         $outTask=$process.StandardOutput.ReadToEndAsync()
         $errTask=$process.StandardError.ReadToEndAsync()
         $process.WaitForExit()
@@ -254,7 +303,7 @@ function Invoke-EncodeBenchmark {
         $psi.StandardErrorEncoding=[Text.Encoding]::UTF8
         $process=New-Object Diagnostics.Process
         $process.StartInfo=$psi
-        if (-not $process.Start()) { throw 'FFmpeg benchmark could not be started.' }
+        if (-not $process.Start()) { throw (T 'EncoderTestBenchmarkCouldNotStart' 'FFmpeg benchmark could not be started.') }
         $outTask=$process.StandardOutput.ReadToEndAsync()
         $errTask=$process.StandardError.ReadToEndAsync()
         while (-not $process.HasExited) {
@@ -338,7 +387,7 @@ function Test-NvencOption {
 }
 
 try {
-    Set-TestStatus -Stage 'Starting' -Current '' -Percent 0 -Message 'Detecting hardware and FFmpeg.'
+    Set-TestStatus -Stage 'Starting' -Current '' -Percent 0 -Message (T 'EncoderTestDetecting' 'Detecting hardware and FFmpeg.')
     Write-Log INFO 'Encoder verification started.'
 
     if ($BenchmarkSeconds -lt 5) { $BenchmarkSeconds=5 }
@@ -346,7 +395,7 @@ try {
 
     $preferences=Read-JsonFile $PreferencesPath
     $ffmpeg=Resolve-ToolPath (Get-P $preferences 'FFmpegPath' '') 'Tools\FFmpeg\ffmpeg.exe'
-    if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) { throw "ffmpeg.exe is missing: $ffmpeg" }
+    if (-not (Test-Path -LiteralPath $ffmpeg -PathType Leaf)) { throw (T 'EncoderTestFfmpegMissing' 'ffmpeg.exe is missing: {0}' @($ffmpeg)) }
 
     $ffmpegVersion=Get-FirstLine -Exe $ffmpeg -Arguments @('-version')
     $encoderResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments @('-hide_banner','-encoders')
@@ -357,14 +406,14 @@ try {
 
     $source=Join-Path $TempFolder 'mediaprep-encoder-benchmark-source.mkv'
     Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
-    Set-TestStatus -Stage 'Preparing' -Current 'Benchmark source' -Percent 4 -Message 'Creating a reproducible 1080p H.264 test sequence.'
+    Set-TestStatus -Stage 'Preparing' -Current (T 'EncoderTestBenchmarkSource' 'Benchmark source') -Percent 4 -Message (T 'EncoderTestCreatingSource' 'Creating a reproducible 1080p H.264 test sequence.')
     $sourceArgs=@('-hide_banner','-loglevel','error','-y','-f','lavfi','-i','testsrc2=size=1920x1080:rate=30','-f','lavfi','-i','sine=frequency=1000:sample_rate=48000','-t',[string]$BenchmarkSeconds,'-c:v','libx264','-preset','ultrafast','-crf','18','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k',$source)
     $sourceResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments $sourceArgs
     if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) {
         Write-Log WARN 'The libx264 test source could not be created; trying MPEG-4.'
         $sourceResult=Invoke-NativeCapture -FilePath $ffmpeg -Arguments @('-hide_banner','-loglevel','error','-y','-f','lavfi','-i','testsrc2=size=1920x1080:rate=30','-t',[string]$BenchmarkSeconds,'-c:v','mpeg4','-q:v','2','-pix_fmt','yuv420p',$source)
     }
-    if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Could not create the benchmark source file with FFmpeg.' }
+    if ($sourceResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw (T 'EncoderTestCreateSourceFailed' 'Could not create the benchmark source file with FFmpeg.') }
 
     $candidates=New-Object System.Collections.Generic.List[object]
     $candidates.Add([pscustomobject][ordered]@{
@@ -414,8 +463,8 @@ try {
     for ($index=0; $index -lt $candidates.Count; $index++) {
         $candidate=$candidates[$index]
         $percent=8+[int](($index/[double]$candidateCount)*84)
-        Set-TestStatus -Stage 'Benchmarking' -Current ([string]$candidate.HardwareName) -Percent $percent -Message ("Testar {0} / {1}" -f $candidate.Backend,$candidate.Encoder) -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $null -Capabilities ([ordered]@{}))
-        Write-Log INFO ("Testar {0}: {1} ({2})" -f $candidate.Backend,$candidate.HardwareName,$candidate.Encoder)
+        Set-TestStatus -Stage 'Benchmarking' -Current ([string]$candidate.HardwareName) -Percent $percent -Message (T 'EncoderTestTestingBackend' 'Testing {0} / {1}' @($candidate.Backend,$candidate.Encoder)) -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $null -Capabilities ([ordered]@{}))
+        Write-Log INFO ("Testing {0}: {1} ({2})" -f $candidate.Backend,$candidate.HardwareName,$candidate.Encoder)
 
         $capabilities=[ordered]@{}
         $benchmark=$null
@@ -423,7 +472,7 @@ try {
         $reason=''
 
         if (-not [bool]$candidate.Detected) {
-            $reason="FFmpeg-builden saknar $($candidate.Encoder)."
+            $reason=(T 'EncoderTestFfmpegBuildMissingEncoder' 'The FFmpeg build does not contain {0}.' @($candidate.Encoder))
         }
         else {
             $output=Join-Path $TempFolder ((Get-StableIdSuffix $candidate.Id)+'-benchmark.mkv')
@@ -455,7 +504,7 @@ try {
                 $verified=$true
                 $ssim=Measure-SSIM -FFmpeg $ffmpeg -Source $source -Encoded $output
                 $benchmark | Add-Member -NotePropertyName SSIM -NotePropertyValue $ssim -Force
-                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+3) -Message 'Benchmark complete. Checking encoder capabilities.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
+                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+3) -Message (T 'EncoderTestBenchmarkCompleteCheckingCapabilities' 'Benchmark complete. Checking encoder capabilities.') -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
 
                 switch ([string]$candidate.Backend) {
                     'NVENC' {
@@ -504,7 +553,7 @@ try {
                         $capabilities['TargetBitrate']=$true
                     }
                 }
-                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+11) -Message 'Encoder verification complete for this device.' -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
+                Set-TestStatus -Stage 'Capabilities' -Current ([string]$candidate.HardwareName) -Percent ($percent+11) -Message (T 'EncoderTestDeviceComplete' 'Encoder verification complete for this device.') -Details (New-LiveEncoderDetails -Candidate $candidate -Benchmark $benchmark -Capabilities $capabilities -Verified $true)
             }
             else {
                 $reason=[string]$benchmark.ErrorText
@@ -579,7 +628,7 @@ try {
     }
     Write-JsonAtomic -Path $BenchmarkPath -Value $benchmarkSummary -Depth 10
 
-    Set-TestStatus -Stage 'Completed' -Current '' -Percent 100 -Message ("Complete. {0} encoder(s) verified." -f $verifiedResults.Count)
+    Set-TestStatus -Stage 'Completed' -Current '' -Percent 100 -Message (T 'EncoderTestComplete' 'Complete. {0} encoder(s) verified.' @($verifiedResults.Count))
     Write-Log INFO ("Encoder verification complete. Verified: {0}/{1}." -f $verifiedResults.Count,$results.Count)
     exit 0
 }

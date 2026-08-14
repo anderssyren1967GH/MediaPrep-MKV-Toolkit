@@ -1,18 +1,79 @@
-﻿[CmdletBinding()]
+﻿# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
+[CmdletBinding()]
 param(
     [string]$InstallPath,
-    [switch]$NoShortcuts
+    [switch]$NoShortcuts,
+    [string]$Language = 'system'
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+$appSource = Split-Path -Parent $MyInvocation.MyCommand.Path
+$sourceRoot = Split-Path -Parent $appSource
+$script:LanguageBase=[pscustomobject]@{}
+$script:L=[pscustomobject]@{}
+function Get-P([object]$Object,[string]$Name,$Default=$null){if($null-eq$Object){return $Default};$p=$Object.PSObject.Properties[$Name];if($null-eq$p){return $Default};return $p.Value}
+function Read-Language([string]$Culture){
+    $path=Join-Path (Join-Path $sourceRoot 'Languages') ('mediaprep.'+$Culture+'.json')
+    if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return $null}
+    try{$doc=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json}catch{return $null}
+    if($null-eq$doc -or [string](Get-P $doc 'SchemaVersion' '') -ne '1'){return $null}
+    return $doc
+}
+function Resolve-Language([string]$Code){
+    $v = if([string]::IsNullOrWhiteSpace($Code)){'system'}else{$Code.Trim()}
+    switch($v.ToLowerInvariant()){
+        'en'      { return 'en-US' }
+        'english' { return 'en-US' }
+        'en-us'   { return 'en-US' }
+        'sv'      { return 'sv-SE' }
+        'swedish' { return 'sv-SE' }
+        'svenska' { return 'sv-SE' }
+        'sv-se'   { return 'sv-SE' }
+        'system'  { }
+        'default' { }
+        default {
+            if($v -ne 'system' -and $v -ne 'default'){
+                try { return ([Globalization.CultureInfo]::GetCultureInfo($v)).Name } catch { return $v }
+            }
+        }
+    }
+    $ui=[Globalization.CultureInfo]::CurrentUICulture
+    $exact=Read-Language $ui.Name
+    if($exact){ return [string](Get-P $exact 'Culture' 'en-US') }
+    foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'Languages') -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+        try{
+            $doc=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8|ConvertFrom-Json
+            $c=[Globalization.CultureInfo]::GetCultureInfo([string](Get-P $doc 'Culture' ''))
+            if($c.TwoLetterISOLanguageName -ieq $ui.TwoLetterISOLanguageName){ return $c.Name }
+        }catch{}
+    }
+    return 'en-US'
+}
+function T([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@()){
+    $bp=if($script:LanguageBase){$script:LanguageBase.PSObject.Properties[$Key]}else{$null}
+    $base=if($bp -and -not[string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p=if($script:L){$script:L.PSObject.Properties[$Key]}else{$null}
+    $value=if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $a=@($FormatArgs)
+    if($a.Count -gt 0){
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$a) } catch {}
+        try { return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$a) } catch { return $Fallback }
+    }
+    return $value
+}
+$script:LanguageBase=Read-Language 'en-US';if($null-eq$script:LanguageBase){$script:LanguageBase=[pscustomobject]@{}}
+$resolvedLanguage=Resolve-Language $Language
+$script:L=Read-Language $resolvedLanguage;if($null-eq$script:L){$script:L=$script:LanguageBase}
 
 # The interactive installer uses WinForms and therefore requires FullLanguage.
 # On managed computers, stop with a clear message before Add-Type produces a
 # cryptic ConstrainedLanguage error. The GitHub web installer can still copy
 # MediaPrep non-interactively, but Start Center itself also requires FullLanguage.
 if ([string]$ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') {
-    $message = @'
+    $message = T 'InstallerConstrainedLanguageMessage' @'
 MediaPrep MKV Toolkit cannot use the interactive installer on this computer.
 
 PowerShell ConstrainedLanguage is enforced.
@@ -32,11 +93,9 @@ before trying to start MediaPrep.
 
 Add-Type -AssemblyName System.Windows.Forms
 
-$appSource = Split-Path -Parent $MyInvocation.MyCommand.Path
-$sourceRoot = Split-Path -Parent $appSource
 if ([string]::IsNullOrWhiteSpace($InstallPath)) {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = 'Select the folder where MediaPrep MKV Toolkit will be installed.'
+    $dialog.Description = T 'InstallerSelectFolder' 'Select the folder where MediaPrep MKV Toolkit will be installed.'
     $dialog.ShowNewFolderButton = $true
     if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
     $InstallPath = Join-Path $dialog.SelectedPath 'MediaPrep MKV Toolkit'
@@ -99,8 +158,8 @@ if (-not $NoShortcuts) {
 }
 
 [System.Windows.Forms.MessageBox]::Show(
-    "MediaPrep MKV Toolkit was installed in:`r`n$InstallPath",
-    'Installation complete',
+    (T 'InstallerCompleteMessage' 'MediaPrep MKV Toolkit was installed in:`r`n{0}' @($InstallPath)),
+    (T 'InstallerCompleteTitle' 'Installation complete'),
     [System.Windows.Forms.MessageBoxButtons]::OK,
     [System.Windows.Forms.MessageBoxIcon]::Information
 ) | Out-Null

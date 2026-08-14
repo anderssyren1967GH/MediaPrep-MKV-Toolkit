@@ -2,11 +2,78 @@
 
 PowerShell toolkit for preparing, muxing, analyzing, organizing, and optionally re-encoding video files to MKV.
 
-**Current release: 0.11.53**
+**Current release build: 0.11.54**
 
 [Download the latest packaged release](https://github.com/anderssyren1967GH/MediaPrep-MKV-Toolkit/releases/latest)
 
-> **License:** Source available for personal, non-commercial use. MediaPrep MKV Toolkit is not distributed under an OSI-approved open-source license. See [LICENSE.md](LICENSE.md).
+> **License:** MediaPrep MKV Toolkit is free/open-source software licensed under **GPL-3.0-or-later**. External tools and codec implementations keep their own licenses. See [LICENSE.md](LICENSE.md), [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md), and [ENCODER-LICENSING.md](ENCODER-LICENSING.md).
+
+## 0.11.54 final
+
+- Promotes the validated beta 12 codebase to the 0.11.54 release without changing mux, queue, encoder, classification, subtitle-language, or CPU/GPU behavior.
+- Ships 14 validated interface languages using schema 1 / `LanguageFileVersion` 1.7.5 / 739 synchronized keys.
+- Includes the GPL-3.0-or-later project license plus separate third-party and encoder/codec licensing documentation.
+- Retains restart-safe UNC staging, error-queue handling, per-file statistics/classification, subtitle-language selection/filename override, and the verified HEVC encoder paths.
+- Includes the corrected language validator with case-sensitive mojibake detection.
+- The published GitHub release should be tested end-to-end from a real 0.11.53 installation, including automatic restart after the updater completes.
+
+## 0.11.54 beta 12 test focus
+
+- Fixes a false-positive mojibake warning in `App\Test-MediaPrepLanguages.ps1` by making the mojibake regex case-sensitive (`-cmatch`).
+- Legitimate lowercase accented characters such as French `â` no longer match uppercase mojibake signatures such as `Â...`.
+- Language resources remain unchanged from beta 11: schema 1 / LanguageFileVersion 1.7.5 / 739 keys across all 14 languages.
+- No mux, queue-processing, Dashboard, encoding, classification, subtitle-language or CPU/GPU layout logic was intentionally changed.
+
+## 0.11.54 beta 11 test focus
+
+- Dashboard localization polish: all tabs, grid headers, buttons and summary captions are explicitly reapplied from the selected language after the window is constructed.
+- The Dashboard watches the saved language preference and can refresh its UI language without leaving a mixed-language window.
+- Slow-copy direction values (`In` / `Out`) are now localized.
+- No mux, queue-processing, encoding, classification or CPU/GPU layout logic was intentionally changed.
+
+## 0.11.54 beta 10 test focus
+
+- Freezes `en-US` as the authoritative 0.11.54 localization master: schema 1 / LanguageFileVersion 1.7.4 / 737 keys.
+- Ships 14 validated interface language resources: English, Swedish, German, French, Spanish, Italian, Finnish, Norwegian Bokmål, Danish, Icelandic, Dutch, Simplified Chinese, Hindi, and Bengali.
+- Every locale has the same key count/order and format placeholders as en-US and is stored as UTF-8 with BOM for Windows PowerShell 5.1 compatibility.
+- Adds a frozen-master SHA-256 record under `Languages\MASTER-en-US-0.11.54.sha256` so accidental edits to the 0.11.54 English master are easy to detect.
+- Language discovery remains dynamic; no hard-coded 14-language list was added to the Start Center. Valid locale JSON files are discovered automatically.
+- This beta is localization-only apart from build markers/documentation. Muxing, queue/UNC behavior, subtitle handling, classification/ratios, encoding, Dashboard logic, and the CPU/GPU layout are unchanged from beta 9.
+
+## 0.11.54 beta 9 test focus
+
+- Changes the MediaPrep source-code license from the previous personal/non-commercial terms to **GNU GPL version 3 or any later version (GPL-3.0-or-later)**.
+- Includes the complete GPLv3 text in `LICENSE`, a concise project notice in `LICENSE.md`, and SPDX `GPL-3.0-or-later` identifiers in shipped PowerShell/CMD source files.
+- Adds `THIRD-PARTY-LICENSES.md` and `ENCODER-LICENSING.md` so the MediaPrep license, external-tool licenses, hardware API licenses and codec/patent questions are not mixed together.
+- Documents the current Gyan FFmpeg essentials download path as a GPLv3 Windows build and records that the MediaPrep ZIP itself does not bundle FFmpeg/ffprobe/MKVToolNix binaries.
+- Records AV1/libaom as the preferred first future codec/encoder candidate for lower royalty-policy friction, but **does not change the working HEVC encoder pipeline in beta 9**.
+- Fixes `App\Test-MediaPrepLanguages.ps1` for Windows PowerShell 5.1 by resolving the repository root after `param(...)` binding instead of using `$PSScriptRoot` inside a default parameter expression, and prevents the validator from falsely detecting its own `Msg(...)` test string as legacy localization.
+- Localization resources remain schema 1 / language-file version 1.7.4 with the same 737 `en-US` / `sv-SE` keys. No translation set is generated yet.
+
+## 0.11.54 beta 8 test focus
+
+- Completes the localization audit before the full translation set is generated. Normal user-facing text is centralized in the common locale JSON resources across Start Center, the processing engine, Queue Dashboard, queue console, tool/version manager, encoder test, updater, local installer, web installer, and early startup paths.
+- `en-US` is the authoritative master/fallback and `sv-SE` is kept in exact lockstep. Both files use schema 1, `LanguageFileVersion = 1.7.4`, UTF-8 with BOM, identical key order, identical placeholders, and 737 keys.
+- Language JSON remains flat, but is arranged in logical blocks with alphabetical keys inside each block so future translations are easier to review and diff.
+- Adds `App\Test-MediaPrepLanguages.ps1`, which validates BOM/JSON/schema/version/culture, exact key count and order, placeholders, empty translations, mojibake patterns, missing source references, and legacy `Msg(...)` localization.
+- Technical diagnostics intended for troubleshooting may remain in English. Internal status codes, established report filenames, codec/container names, executable names, and product/version labels are not translated.
+- Only `en-US` and `sv-SE` are shipped in beta 8. The additional planned language files are deliberately postponed until this master text set has passed beta testing and is frozen.
+- Processing behavior from beta 7 is intentionally unchanged: muxing, queue isolation, subtitle-language handling, TV/Film/Other classification, ratios, error handling, and CPU/GPU layout are regression-test targets only.
+
+## 0.11.54 beta 7 test focus
+
+- Restores UNC import/mux after the subtitle-language implementation exposed a Windows PowerShell generic-list binder problem.
+- Subtitle language discovery/matching uses `.Count` / `.ToArray()` instead of `@(...)` around `New-Object System.Collections.Generic.List[object]`.
+- Empty UNC result sets remain an explicit empty `object[]`, so report generation does not receive `$null` after a completely failed import.
+- Beta 6 conditional folder-language prompt and Error-folder cleanup remain unchanged.
+
+## 0.11.54 beta 6 test focus
+
+- Queue folder language prompt now appears only when a matching external subtitle lacks an explicit language suffix; one choice applies to all such subtitles in that folder.
+- Folders with no matching subtitles, or only explicitly tagged subtitles such as `.en/.eng/.sv/.swe`, are added without a language dialog.
+- Removing the final error item belonging to a queue folder now removes that empty folder from the active queue/settings as well.
+
+This beta adds per-folder subtitle-language control for UNC queue items and hardens failed-media handling. When a queue folder is added, MediaPrep asks which installed language should be used for untagged subtitles and offers a default-on filename override. Files such as `Series 1x02.en.srt`, `Series 1x02.eng.srt`, `Series 1x02.sv.srt`, and `Series 1x02.swe.srt` match `Series 1x02.<video>` while the explicit language suffix can control MKV metadata. Failed UNC imports remain errors, do not enter the return stage, do not cause unrelated Processed MKVs to be analyzed, keep the remote source intact, and allow later queue folders to continue. Beta 4 TV/Film/Other classification and episode-number sequence detection remain unchanged.
 
 ## Overview
 
@@ -44,7 +111,7 @@ The project intentionally remains PowerShell-based. There is no compiled applica
 - Online selection of recent FFmpeg and MKVToolNix versions
 - Local tool backup and rollback
 - Light, Dark, Monthly, and Custom interface themes
-- Swedish and English interface language files
+- 14 interface languages with dynamic locale discovery
 
 ## Requirements
 
@@ -112,9 +179,20 @@ Supported subtitle formats:
 
 SRT is preferred when both formats are present.
 
+In UNC Queue mode, each folder has its own subtitle-language option. The dropdown is populated from installed MediaPrep language resources. Untagged subtitles such as `Movie.srt` or `Movie.vtt` use the language selected for that folder. With the filename-language override enabled (the default), explicit recognized suffixes take precedence, for example:
+
+```text
+Series 1x02.en.srt   -> English
+Series 1x02.eng.srt  -> English
+Series 1x02.sv.srt   -> Swedish
+Series 1x02.swe.srt  -> Swedish
+```
+
+The language suffix is ignored when matching the subtitle to the video basename, so all four examples above match `Series 1x02.ts`, `Series 1x02.mkv`, or another selected video format with the same basename. As more valid locale JSON files are installed, their standard two- and three-letter language codes become available to the same mechanism.
+
 VTT subtitles can be converted to temporary SRT files before muxing. Subtitles are muxed into the MKV as selectable subtitle tracks; they are not burned into the video.
 
-MediaPrep can also create an MKV when no matching subtitle exists.
+MediaPrep can also create an MKV when no matching subtitle exists. Existing MKV results may be rerun when a new matching external subtitle is added, provided MKV input is selected for that run.
 
 ## CPU/GPU encoder verification
 
@@ -271,13 +349,27 @@ Language files are stored under:
 
 ```text
 Languages\
-    mediaprep.en-US.json
-    mediaprep.sv-SE.json
+    mediaprep.en-US.json   English
+    mediaprep.sv-SE.json   Svenska
+    mediaprep.de-DE.json   Deutsch
+    mediaprep.fr-FR.json   Français
+    mediaprep.es-ES.json   Español
+    mediaprep.it-IT.json   Italiano
+    mediaprep.fi-FI.json   Suomi
+    mediaprep.nb-NO.json   Norsk bokmål
+    mediaprep.da-DK.json   Dansk
+    mediaprep.is-IS.json   Íslenska
+    mediaprep.nl-NL.json   Nederlands
+    mediaprep.zh-CN.json   简体中文
+    mediaprep.hi-IN.json   हिन्दी
+    mediaprep.bn-BD.json   বাংলা
 ```
 
-Language resources use BCP-47 culture names and JSON. The current distribution includes English (`en-US`) and Swedish (`sv-SE`). **System default** resolves the Windows UI culture to an installed resource; if the exact regional culture is not installed, MediaPrep first tries an installed resource for the same language and finally falls back to `en-US`.
+Language resources use BCP-47 culture names and JSON. The current distribution includes all 14 resources above. **System default** resolves the Windows UI culture to an installed resource; if the exact regional culture is not installed, MediaPrep first tries an installed resource for the same language and finally falls back to `en-US`.
 
-Each language file declares `SchemaVersion`, `LanguageFileVersion`, `Culture`, and its native display name. MediaPrep validates the schema before loading the resource. `en-US` is the authoritative fallback for missing keys or broken format placeholders, so an older same-schema translation cannot crash the application simply because a newer text key is absent. Additional valid `mediaprep.<culture>.json` files can be discovered automatically by the language selector.
+Each language file declares `SchemaVersion`, `LanguageFileVersion`, `Culture`, and its native display name. `en-US` is the authoritative master/fallback and is frozen for 0.11.54. In 0.11.54 all 14 resources use schema 1 / language-file version 1.7.5 and contain the same 739 keys in the same order with the same format placeholders. Additional valid `mediaprep.<culture>.json` files can still be discovered automatically by the language selector.
+
+Before a language package is accepted for release, `App\Test-MediaPrepLanguages.ps1` can validate UTF-8 BOM, JSON parsing, schema/version/culture metadata, exact key count and ordering, placeholder compatibility, empty strings, common mojibake patterns, and literal language-key references in the shipped PowerShell sources. Normal user-facing text is kept in the shared JSON resources; low-level troubleshooting diagnostics may intentionally remain English.
 
 ## Installation
 
@@ -342,7 +434,10 @@ MediaPrep MKV Toolkit\
 ├─ Start MediaPrep.cmd
 ├─ README.md
 ├─ CHANGELOG.md
+├─ LICENSE
 ├─ LICENSE.md
+├─ THIRD-PARTY-LICENSES.md
+├─ ENCODER-LICENSING.md
 ├─ THIRD-PARTY-NOTICES.md
 ├─ App\
 │  ├─ MediaPrep-Start.ps1
@@ -436,21 +531,25 @@ It intentionally does **not** contain:
 
 ## License
 
-Copyright © 2026 Anders Syrén. All rights reserved.
+Copyright © 2026 Anders Syrén.
 
-MediaPrep MKV Toolkit is **source available for personal, non-commercial use**.
+MediaPrep MKV Toolkit is licensed under **GNU GPL version 3 or any later version (`GPL-3.0-or-later`)**.
 
-Commercial use, commercial redistribution, paid inclusion, and other uses restricted by the license require prior written permission from Anders Syrén.
+- [`LICENSE`](LICENSE) contains the complete GPLv3 license text.
+- [`LICENSE.md`](LICENSE.md) explains the MediaPrep project notice and the “or later” choice.
+- Source scripts carry an SPDX `GPL-3.0-or-later` identifier.
 
-See [LICENSE.md](LICENSE.md) for the complete license terms.
+The GPL applies to the MediaPrep code. It does **not** change the licenses of FFmpeg, MKVToolNix, GPU drivers/SDKs or codec implementations.
 
-This license is **not an OSI-approved open-source license**.
+## Third-party software and encoders
 
-## Third-party software
+MediaPrep deliberately keeps third-party licensing separate from the MediaPrep source-code license. Official MediaPrep ZIPs do not bundle FFmpeg, ffprobe or MKVToolNix binaries.
 
-MediaPrep can use third-party tools including FFmpeg and MKVToolNix. These projects are distributed under their own licenses and are not included under the MediaPrep MKV Toolkit license.
+- [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md) documents the external-tool boundary and current download sources.
+- [`ENCODER-LICENSING.md`](ENCODER-LICENSING.md) distinguishes encoder software/API licensing from codec/patent licensing and records AV1 as the preferred future lower-licensing-friction candidate.
+- [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) is the short notice/index.
 
-See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+The licensing documents are intended to make the technical boundaries clear; they are not legal advice.
 
 ## Changelog
 
@@ -488,3 +587,8 @@ Additional valid cultures can be discovered automatically. `en-US` is the safe m
 ### 0.11.53 update safety
 
 MediaPrep checks for an active queue/media worker immediately before launching the updater. The updater repeats the check after Start Center exits and before changing any program files. If work is active, the update is cancelled without stopping the queue or closing its Dashboard.
+
+
+## 0.11.54 beta 1 development note
+
+This beta adds explicit TV / Film / Other classification and a selectable target profile for unrecognized files. Duration is used for MB/min calculations, never to decide whether a title is a TV episode or a film. Per-file classification and ratio data is preserved in Dashboard statistics for later tuning.

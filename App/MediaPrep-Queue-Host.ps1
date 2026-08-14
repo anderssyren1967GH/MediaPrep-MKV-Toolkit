@@ -1,4 +1,6 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$JobFile,

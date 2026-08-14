@@ -1,4 +1,6 @@
 ﻿#requires -Version 5.1
+# Copyright (C) 2026 Anders Syrén
+# SPDX-License-Identifier: GPL-3.0-or-later
 [CmdletBinding()]
 param(
     [string]$Root = (Split-Path -Parent $PSScriptRoot),
@@ -21,17 +23,79 @@ $EncoderBenchmark=Join-Path $DataFolder 'encoder-benchmark.json'
 $EncoderTestStatus=Join-Path $DataFolder 'encoder-test-status.json'
 foreach($folder in @($DataFolder,$Downloads,$ToolsRoot,$BackupRoot,$ProgramBackupRoot)){if(-not(Test-Path -LiteralPath $folder)){New-Item -ItemType Directory -Force -Path $folder|Out-Null}}
 
-function Is-Swedish {
-    $languageValue=[string]$Language
-    if($languageValue -match '^(?i:sv|sv-SE|swedish|svenska)$'){return $true}
-    if($languageValue -match '^(?i:en|en-US|english)$'){return $false}
-    return ([Globalization.CultureInfo]::CurrentUICulture.Name -like 'sv*')
-}
-$sv=Is-Swedish
-function Msg([string]$en,[string]$svText){if($sv){return $svText};return $en}
 function Read-Json($path){if(Test-Path -LiteralPath $path -PathType Leaf){try{return (Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json)}catch{return $null}};return $null}
 function Write-Json($path,$value){$value|ConvertTo-Json -Depth 10|Set-Content -LiteralPath $path -Encoding UTF8}
 function Get-P($object,[string]$name,$default=$null){if($null-eq$object){return $default};$property=$object.PSObject.Properties[$name];if($null-eq$property){return $default};return $property.Value}
+
+# Tool Manager uses the same JSON language resources as Start Center. en-US is
+# authoritative and remains the fallback if a selected translation is missing a key.
+$script:LanguageSchemaVersion=1
+$script:RequiredLanguageFileVersion='1.7.5'
+$script:FallbackLanguageCulture='en-US'
+$script:LanguageBase=[pscustomobject]@{}
+$script:L=[pscustomobject]@{}
+function Normalize-LanguagePreference([string]$Code){
+    if([string]::IsNullOrWhiteSpace($Code)){return 'system'}
+    $value=$Code.Trim()
+    switch($value.ToLowerInvariant()){
+        'system'{return 'system'}
+        'default'{return 'system'}
+        'en'{return 'en-US'}
+        'english'{return 'en-US'}
+        'en-us'{return 'en-US'}
+        'sv'{return 'sv-SE'}
+        'swedish'{return 'sv-SE'}
+        'svenska'{return 'sv-SE'}
+        'sv-se'{return 'sv-SE'}
+    }
+    try{return ([Globalization.CultureInfo]::GetCultureInfo($value)).Name}catch{return $value}
+}
+function Read-LanguageDocument([string]$Path){
+    $doc=Read-Json $Path
+    if($null-eq$doc){return $null}
+    try{$schema=[int](Get-P $doc 'SchemaVersion' -1)}catch{return $null}
+    if($schema-ne$script:LanguageSchemaVersion){return $null}
+    if([string]::IsNullOrWhiteSpace([string](Get-P $doc 'Culture' ''))){return $null}
+    return $doc
+}
+function Get-LanguagePath([string]$Culture){return (Join-Path (Join-Path $Root 'Languages') ('mediaprep.'+$Culture+'.json'))}
+function Get-SystemLanguageCode{
+    $ui=[Globalization.CultureInfo]::CurrentUICulture
+    $folder=Join-Path $Root 'Languages'
+    $entries=New-Object System.Collections.Generic.List[object]
+    foreach($file in @(Get-ChildItem -LiteralPath $folder -Filter 'mediaprep.*.json' -File -ErrorAction SilentlyContinue)){
+        $doc=Read-LanguageDocument $file.FullName
+        if($doc){$entries.Add([pscustomobject]@{Culture=[string](Get-P $doc 'Culture' '');Document=$doc})}
+    }
+    foreach($entry in $entries){if([string]$entry.Culture -ieq $ui.Name){return [string]$entry.Culture}}
+    foreach($entry in $entries){try{$c=[Globalization.CultureInfo]::GetCultureInfo([string]$entry.Culture);if($c.TwoLetterISOLanguageName -ieq $ui.TwoLetterISOLanguageName){return [string]$entry.Culture}}catch{}}
+    return $script:FallbackLanguageCulture
+}
+function Initialize-ToolManagerLanguage{
+    $base=Read-LanguageDocument (Get-LanguagePath $script:FallbackLanguageCulture)
+    if($null-eq$base){$base=[pscustomobject]@{}}
+    $script:LanguageBase=$base
+    $requested=Normalize-LanguagePreference ([string]$Language)
+    $resolved=if($requested-eq'system'){Get-SystemLanguageCode}else{$requested}
+    $selected=Read-LanguageDocument (Get-LanguagePath $resolved)
+    if($null-eq$selected){$selected=$base}
+    if($null-eq$selected){$selected=[pscustomobject]@{}}
+    $script:L=$selected
+}
+function T([string]$Key,[string]$Fallback,[object[]]$FormatArgs=@()){
+    $bp=if($script:LanguageBase){$script:LanguageBase.PSObject.Properties[$Key]}else{$null}
+    $base=if($bp -and -not[string]::IsNullOrWhiteSpace([string]$bp.Value)){[string]$bp.Value}else{$Fallback}
+    $p=if($script:L){$script:L.PSObject.Properties[$Key]}else{$null}
+    $value=if($p -and -not[string]::IsNullOrWhiteSpace([string]$p.Value)){[string]$p.Value}else{$base}
+    $args=@($FormatArgs)
+    if($args.Count-gt0){
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$value,$args)}catch{}
+        if($value-ne$base){try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$base,$args)}catch{}}
+        try{return [string]::Format([Globalization.CultureInfo]::CurrentCulture,$Fallback,$args)}catch{return $Fallback}
+    }
+    return $value
+}
+Initialize-ToolManagerLanguage
 function Get-VersionText($exe){
     if(-not(Test-Path -LiteralPath $exe -PathType Leaf)){return $null}
     try{
@@ -62,7 +126,7 @@ function Test-FFmpegFeatures($exe){
     $result.Nvenc=($enc -match '\bhevc_nvenc\b');$result.Amf=($enc -match '\bhevc_amf\b');$result.Qsv=($enc -match '\bhevc_qsv\b');$result.CpuHevc=($enc -match '\blibx265\b');$result.Cuda=($hw -match '\bcuda\b')
     return [pscustomobject]$result
 }
-function Download-File($url,$path){Write-Host (Msg "Downloading: $url" "Hämtar: $url") -ForegroundColor Cyan;Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $path}
+function Download-File($url,$path){Write-Host (T 'ToolMgrDownloading' 'Downloading: {0}' @($url)) -ForegroundColor Cyan;Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $path}
 function ConvertTo-NativeArgument {
     param([AllowNull()][string]$Value)
     if($null-eq$Value){return '""'}
@@ -114,7 +178,7 @@ function Test-StagedFfmpegCompatibility {
             $a+=@($output)
             $exit=Invoke-NativeExit -Exe $Exe -Arguments $a
             if($exit-ne0 -or -not(Test-Path -LiteralPath $output -PathType Leaf) -or (Get-Item -LiteralPath $output).Length-lt1024){
-                throw (Msg ("Staged FFmpeg failed the {0} compatibility test." -f $test.Backend) ("Den nya FFmpeg-versionen klarade inte kompatibilitetstestet för {0}." -f $test.Backend))
+                throw (T 'ToolMgrFfmpegCompatibilityFailed' 'Staged FFmpeg failed the {0} compatibility test.' @($test.Backend))
             }
         }finally{Remove-Item -LiteralPath $output -Force -ErrorAction SilentlyContinue}
     }
@@ -123,7 +187,7 @@ function Test-StagedFfmpegCompatibility {
 function Sanitize-Name([string]$text){if([string]::IsNullOrWhiteSpace($text)){return 'unknown'};$v=$text -replace '[^A-Za-z0-9._-]','_';if($v.Length -gt 80){$v=$v.Substring(0,80)};return $v.Trim('_')}
 function Invalidate-EncoderCheck {
     Remove-Item -LiteralPath $EncoderCapabilities,$EncoderBenchmark,$EncoderTestStatus -Force -ErrorAction SilentlyContinue
-    Write-Host (Msg 'The CPU/GPU verification was invalidated because FFmpeg changed.' 'CPU/GPU-kontrollen har ogiltigförklarats eftersom FFmpeg ändrades.') -ForegroundColor Yellow
+    Write-Host (T 'ToolMgrEncoderVerificationInvalidated' 'The CPU/GPU verification was invalidated because FFmpeg changed.') -ForegroundColor Yellow
 }
 function Write-ToolMetadata {
     param([string]$Folder,[string]$Tool,[string]$Version)
@@ -142,21 +206,21 @@ function Backup-ToolFolder {
     $destination=Join-Path $toolBackups $name
     Copy-Item -LiteralPath $CurrentFolder -Destination $destination -Recurse -Force
     Write-ToolMetadata -Folder $destination -Tool $Tool -Version $version
-    Write-Host (Msg "Backup created: $destination" "Säkerhetskopia skapad: $destination") -ForegroundColor DarkCyan
+    Write-Host (T 'ToolMgrBackupCreated' 'Backup created: {0}' @($destination)) -ForegroundColor DarkCyan
     return $destination
 }
 function Restore-ToolBackup {
     param([string]$Tool,[string]$BackupFolder,[string]$TargetFolder,[string]$RequiredExe)
     $backupExe=Join-Path $BackupFolder $RequiredExe
-    if(-not(Test-Path -LiteralPath $backupExe -PathType Leaf)){throw (Msg 'The selected backup is incomplete.' 'Den valda säkerhetskopian är ofullständig.')}
+    if(-not(Test-Path -LiteralPath $backupExe -PathType Leaf)){throw (T 'ToolMgrSelectedBackupIncomplete' 'The selected backup is incomplete.')}
     $emergency=$null
     if(Test-Path -LiteralPath $TargetFolder -PathType Container){$emergency=Backup-ToolFolder -Tool ($Tool+'-before-restore') -CurrentFolder $TargetFolder -VersionExe (Join-Path $TargetFolder $RequiredExe)}
     try{
         Remove-Item -LiteralPath $TargetFolder -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath $BackupFolder -Destination $TargetFolder -Recurse -Force
         $restoredExe=Join-Path $TargetFolder $RequiredExe
-        if(-not(Test-Path -LiteralPath $restoredExe -PathType Leaf)){throw 'Executable missing after restore.'}
-        Write-Host (Msg "Restored $Tool successfully." "$Tool återställdes.") -ForegroundColor Green
+        if(-not(Test-Path -LiteralPath $restoredExe -PathType Leaf)){throw (T 'ToolMgrExecutableMissingAfterRestore' 'Executable missing after restore.')}
+        Write-Host (T 'ToolMgrRestoredTool' 'Restored {0} successfully.' @($Tool)) -ForegroundColor Green
         if($Tool -eq 'FFmpeg'){Invalidate-EncoderCheck}
     }catch{
         if($emergency -and (Test-Path -LiteralPath $emergency)){
@@ -170,15 +234,15 @@ function Select-Backup {
     param([string]$Tool)
     $folder=Join-Path $BackupRoot $Tool
     $items=@(Get-ChildItem -LiteralPath $folder -Directory -ErrorAction SilentlyContinue|Sort-Object LastWriteTime -Descending)
-    if($items.Count -eq 0){Write-Host (Msg "No saved $Tool versions." "Inga sparade $Tool-versioner finns.") -ForegroundColor Yellow;return $null}
+    if($items.Count -eq 0){Write-Host (T 'ToolMgrNoSavedToolVersions' 'No saved {0} versions.' @($Tool)) -ForegroundColor Yellow;return $null}
     Write-Host ''
-    Write-Host (Msg "Saved $Tool versions:" "Sparade $Tool-versioner:") -ForegroundColor Cyan
+    Write-Host (T 'ToolMgrSavedToolVersions' 'Saved {0} versions:' @($Tool)) -ForegroundColor Cyan
     for($i=0;$i -lt $items.Count;$i++){
         $meta=Read-Json (Join-Path $items[$i].FullName 'mediaprep-tool-version.json')
         $version=if($meta){[string]$meta.Version}else{$items[$i].Name}
         Write-Host ('[{0}] {1}' -f ($i+1),$version)
     }
-    $answer=Read-Host (Msg 'Choose number or Enter to cancel' 'Välj nummer eller Enter för att avbryta')
+    $answer=Read-Host (T 'ToolMgrChooseNumberCancel' 'Choose number or Enter to cancel')
     if([string]::IsNullOrWhiteSpace($answer)){return $null}
     $number=0;if (-not [int]::TryParse($answer,[ref]$number) -or $number -lt 1 -or $number -gt $items.Count){return $null}
     return $items[$number-1].FullName
@@ -223,17 +287,17 @@ function Get-OnlineMediaPrepReleases {
 }
 function Select-OnlineMediaPrepRelease {
     $items=@(Get-OnlineMediaPrepReleases)
-    if($items.Count-eq0){throw (Msg 'Could not retrieve MediaPrep releases from GitHub.' 'Kunde inte hämta MediaPrep-versioner från GitHub.')}
+    if($items.Count-eq0){throw (T 'ToolMgrGithubMediaPrepUnavailable' 'Could not retrieve MediaPrep releases from GitHub.')}
     $current=Get-CurrentMediaPrepVersion
-    Write-Host '';Write-Host (Msg 'MediaPrep versions available on GitHub:' 'MediaPrep-versioner tillgängliga på GitHub:') -ForegroundColor Cyan
+    Write-Host '';Write-Host (T 'ToolMgrGithubMediaPrepVersions' 'MediaPrep versions available on GitHub:') -ForegroundColor Cyan
     for($i=0;$i-lt$items.Count;$i++){
         $labels=New-Object System.Collections.Generic.List[string]
-        if($i-eq0){$labels.Add((Msg 'latest' 'senaste'))}
-        if([string]$items[$i].Version -eq $current){$labels.Add((Msg 'installed' 'installerad'))}
+        if($i-eq0){$labels.Add((T 'ToolMgrLatest' 'latest'))}
+        if([string]$items[$i].Version -eq $current){$labels.Add((T 'ToolMgrInstalled' 'installed'))}
         $suffix=if($labels.Count-gt0){'  ['+($labels -join ', ')+']'}else{''}
         Write-Host ('[{0}] {1}{2}' -f ($i+1),$items[$i].Version,$suffix)
     }
-    $answer=Read-Host (Msg 'Choose version number or Enter to cancel' 'Välj versionsnummer eller Enter för att avbryta')
+    $answer=Read-Host (T 'ToolMgrChooseVersionCancel' 'Choose version number or Enter to cancel')
     if([string]::IsNullOrWhiteSpace($answer)){return $null}
     $number=0;if(-not[int]::TryParse($answer,[ref]$number) -or $number-lt1 -or $number-gt$items.Count){return $null}
     return $items[$number-1]
@@ -242,18 +306,18 @@ function Stage-MediaPrepRelease {
     param([Parameter(Mandatory=$true)][object]$Release)
     $current=Get-CurrentMediaPrepVersion
     $target=[string](Get-P $Release 'Version' '')
-    if([string]::IsNullOrWhiteSpace($target)){throw 'Invalid MediaPrep version selection.'}
-    if($target -eq $current){Write-Host (Msg 'That MediaPrep version is already installed.' 'Den MediaPrep-versionen är redan installerad.') -ForegroundColor Yellow;return $false}
+    if([string]::IsNullOrWhiteSpace($target)){throw (T 'ToolMgrInvalidMediaPrepSelection' 'Invalid MediaPrep version selection.')}
+    if($target -eq $current){Write-Host (T 'ToolMgrAlreadyInstalled' 'That MediaPrep version is already installed.') -ForegroundColor Yellow;return $false}
     try{
         if([version]$target -lt [version]$current){
-            Write-Host (Msg ("You are about to install an older MediaPrep version. Installed: {0}; selected: {1}." -f $current,$target) ("Du håller på att installera en äldre MediaPrep-version. Installerad: {0}; vald: {1}." -f $current,$target)) -ForegroundColor Yellow
-            $confirm=Read-Host (Msg 'Continue downgrade? [Y/N]' 'Fortsätt nedgradering? [J/N]')
+            Write-Host (T 'ToolMgrDowngradeWarning' 'You are about to install an older MediaPrep version. Installed: {0}; selected: {1}.' @($current,$target)) -ForegroundColor Yellow
+            $confirm=Read-Host (T 'ToolMgrContinueDowngrade' 'Continue downgrade? [Y/N]')
             if($confirm -notmatch '^(?i:y|yes|j|ja)$'){return $false}
         }
     }catch{}
     $url=[string](Get-P $Release 'Url' '')
     $assetName=[string](Get-P $Release 'AssetName' '')
-    if([string]::IsNullOrWhiteSpace($url)-or[string]::IsNullOrWhiteSpace($assetName)){throw 'The selected release has no downloadable package.'}
+    if([string]::IsNullOrWhiteSpace($url)-or[string]::IsNullOrWhiteSpace($assetName)){throw (T 'ToolMgrReleaseNoPackage' 'The selected release has no downloadable package.')}
     $zip=Join-Path $Downloads $assetName
     $extract=Join-Path $Downloads ('mediaprep-release-'+$target+'-'+[guid]::NewGuid().ToString('N'))
     try{
@@ -261,30 +325,30 @@ function Stage-MediaPrepRelease {
         $digest=[string](Get-P $Release 'Digest' '')
         if($digest -match '^sha256:([0-9A-Fa-f]{64})$'){
             $expected=$Matches[1];$actual=(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-            if($actual-ne$expected){throw 'MediaPrep release SHA-256 verification failed.'}
-            Write-Host 'SHA-256: OK' -ForegroundColor Green
+            if($actual-ne$expected){throw (T 'ToolMgrShaFailed' 'MediaPrep release SHA-256 verification failed.')}
+            Write-Host (T 'ToolMgrShaOk' 'SHA-256: OK') -ForegroundColor Green
         }
         New-Item -ItemType Directory -Path $extract -Force|Out-Null
         Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
         $launcher=Get-ChildItem -LiteralPath $extract -Filter 'Start MediaPrep.cmd' -File -Recurse|Select-Object -First 1
-        if($null-eq$launcher){throw 'The MediaPrep release does not contain Start MediaPrep.cmd.'}
+        if($null-eq$launcher){throw (T 'ToolMgrReleaseLauncherMissing' 'The MediaPrep release does not contain Start MediaPrep.cmd.')}
         $stageRoot=$launcher.Directory.FullName
-        if(-not(Test-Path -LiteralPath (Join-Path $stageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw 'The MediaPrep release is incomplete.'}
+        if(-not(Test-Path -LiteralPath (Join-Path $stageRoot 'App\MediaPrep-Start.ps1') -PathType Leaf)){throw (T 'ToolMgrReleaseIncomplete' 'The MediaPrep release is incomplete.')}
         Write-Json $MediaPrepUpdateRequest ([pscustomobject][ordered]@{TargetVersion=$target;CurrentVersion=$current;StageRoot=$stageRoot;IsBackupRestore=$false;RequestedLocal=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')})
-        Write-Host (Msg ("MediaPrep {0} is downloaded and verified. Start Center will close, install it, and restart." -f $target) ("MediaPrep {0} är hämtad och verifierad. Start Center stängs, installerar versionen och startar om." -f $target)) -ForegroundColor Green
+        Write-Host (T 'ToolMgrReleaseReadyRestart' 'MediaPrep {0} is downloaded and verified. Start Center will close, install it, and restart.' @($target)) -ForegroundColor Green
         return $true
     }finally{Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue}
 }
 function Select-ProgramBackup {
     $items=@(Get-ChildItem -LiteralPath $ProgramBackupRoot -Directory -ErrorAction SilentlyContinue|Sort-Object LastWriteTime -Descending)
-    if($items.Count-eq0){Write-Host (Msg 'No saved MediaPrep program versions.' 'Inga sparade MediaPrep-programversioner finns.') -ForegroundColor Yellow;return $null}
-    Write-Host '';Write-Host (Msg 'Saved MediaPrep program versions:' 'Sparade MediaPrep-programversioner:') -ForegroundColor Cyan
+    if($items.Count-eq0){Write-Host (T 'ToolMgrNoSavedMediaPrepVersions' 'No saved MediaPrep program versions.') -ForegroundColor Yellow;return $null}
+    Write-Host '';Write-Host (T 'ToolMgrSavedMediaPrepVersions' 'Saved MediaPrep program versions:') -ForegroundColor Cyan
     for($i=0;$i-lt$items.Count;$i++){
         $meta=Read-Json (Join-Path $items[$i].FullName 'mediaprep-program-version.json')
         $version=if($meta){[string](Get-P $meta 'Version' $items[$i].Name)}else{$items[$i].Name}
         Write-Host ('[{0}] {1}' -f ($i+1),$version)
     }
-    $answer=Read-Host (Msg 'Choose number or Enter to cancel' 'Välj nummer eller Enter för att avbryta')
+    $answer=Read-Host (T 'ToolMgrChooseNumberCancel' 'Choose number or Enter to cancel')
     if([string]::IsNullOrWhiteSpace($answer)){return $null}
     $number=0;if(-not[int]::TryParse($answer,[ref]$number)-or$number-lt1-or$number-gt$items.Count){return $null}
     return $items[$number-1]
@@ -295,13 +359,13 @@ function Request-MediaPrepBackupRestore {
     $meta=Read-Json (Join-Path $backup.FullName 'mediaprep-program-version.json')
     $target=if($meta){[string](Get-P $meta 'Version' $backup.Name)}else{$backup.Name}
     Write-Json $MediaPrepUpdateRequest ([pscustomobject][ordered]@{TargetVersion=$target;CurrentVersion=(Get-CurrentMediaPrepVersion);StageRoot=$backup.FullName;IsBackupRestore=$true;RequestedLocal=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss')})
-    Write-Host (Msg ("MediaPrep {0} will be restored when this window closes." -f $target) ("MediaPrep {0} återställs när detta fönster stängs." -f $target)) -ForegroundColor Green
+    Write-Host (T 'ToolMgrRestoreScheduled' 'MediaPrep {0} will be restored when this window closes.' @($target)) -ForegroundColor Green
     return $true
 }
 
 function Show-RestoreMenu {
     Write-Host ''
-    Write-Host (Msg '[P] Restore MediaPrep, [F] FFmpeg, [M] MKVToolNix, [Q] back' '[P] Återställ MediaPrep, [F] FFmpeg, [M] MKVToolNix, [Q] tillbaka') -ForegroundColor White
+    Write-Host (T 'ToolMgrRestoreMenu' '[P] Restore MediaPrep, [F] FFmpeg, [M] MKVToolNix, [Q] back') -ForegroundColor White
     $choice=Read-Host '>'
     if ($choice -match '^[Pp]$'){return (Request-MediaPrepBackupRestore)}
     elseif ($choice -match '^[Ff]$'){$backup=Select-Backup -Tool 'FFmpeg';if($backup){Restore-ToolBackup -Tool 'FFmpeg' -BackupFolder $backup -TargetFolder (Join-Path $ToolsRoot 'FFmpeg') -RequiredExe 'ffmpeg.exe'}}
@@ -358,14 +422,14 @@ function Get-OnlineFfmpegReleases {
 }
 function Select-OnlineFfmpegRelease {
     $items=@(Get-OnlineFfmpegReleases)
-    if($items.Count-eq0){throw (Msg 'Could not retrieve online FFmpeg releases.' 'Kunde inte hämta FFmpeg-versioner online.')}
+    if($items.Count-eq0){throw (T 'ToolMgrFfmpegOnlineUnavailable' 'Could not retrieve online FFmpeg releases.')}
     $current=Get-ShortToolVersion (Get-VersionText (Join-Path $ToolsRoot 'FFmpeg\ffmpeg.exe')) 'FFmpeg'
-    Write-Host '';Write-Host (Msg 'FFmpeg versions available online:' 'FFmpeg-versioner tillgängliga online:') -ForegroundColor Cyan
+    Write-Host '';Write-Host (T 'ToolMgrFfmpegOnlineVersions' 'FFmpeg versions available online:') -ForegroundColor Cyan
     for($i=0;$i-lt$items.Count;$i++){
-        $suffix=if([string]$items[$i].Version -eq $current){'  '+(Msg '[installed]' '[installerad]')}else{''}
+        $suffix=if([string]$items[$i].Version -eq $current){'  '+(T 'ToolMgrInstalledBracket' '[installed]')}else{''}
         Write-Host ('[{0}] {1}{2}' -f ($i+1),$items[$i].Version,$suffix)
     }
-    $answer=Read-Host (Msg 'Choose version number or Enter to cancel' 'Välj versionsnummer eller Enter för att avbryta')
+    $answer=Read-Host (T 'ToolMgrChooseVersionCancel' 'Choose version number or Enter to cancel')
     if([string]::IsNullOrWhiteSpace($answer)){return $null}
     $number=0;if(-not [int]::TryParse($answer,[ref]$number) -or $number -lt 1 -or $number -gt $items.Count){return $null}
     return $items[$number-1]
@@ -377,7 +441,7 @@ function Install-FFmpeg {
     $assetName=[string](Get-P $Release 'AssetName' '')
     $url=[string](Get-P $Release 'Url' '')
     $requestedVersion=[string](Get-P $Release 'Version' '')
-    if([string]::IsNullOrWhiteSpace($assetName)-or[string]::IsNullOrWhiteSpace($url)){throw 'Invalid FFmpeg release selection.'}
+    if([string]::IsNullOrWhiteSpace($assetName)-or[string]::IsNullOrWhiteSpace($url)){throw (T 'ToolMgrInvalidFfmpegSelection' 'Invalid FFmpeg release selection.')}
     $zip=Join-Path $Downloads $assetName;Download-File $url $zip
     $extract=Join-Path $Downloads ('ffmpeg-stage-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Force -Path $extract|Out-Null
     $newFolder=Join-Path $Downloads ('ffmpeg-ready-'+[guid]::NewGuid().ToString('N'))
@@ -385,22 +449,22 @@ function Install-FFmpeg {
         Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
         $bin=Get-ChildItem $extract -Directory|Select-Object -First 1|ForEach-Object{Join-Path $_.FullName 'bin'}
         $newFfmpeg=Join-Path $bin 'ffmpeg.exe';$newFfprobe=Join-Path $bin 'ffprobe.exe'
-        if (-not (Test-Path $newFfmpeg) -or -not (Test-Path $newFfprobe)){throw 'ffmpeg.exe/ffprobe.exe missing after extraction.'}
-        $version=Get-VersionText $newFfmpeg;if([string]::IsNullOrWhiteSpace($version)){throw 'The downloaded FFmpeg build could not be executed.'}
-        $features=Test-FFmpegFeatures $newFfmpeg;if(-not$features.CpuHevc){throw 'The downloaded FFmpeg build does not contain libx265.'}
+        if (-not (Test-Path $newFfmpeg) -or -not (Test-Path $newFfprobe)){throw (T 'ToolMgrFfmpegFilesMissing' 'ffmpeg.exe/ffprobe.exe missing after extraction.')}
+        $version=Get-VersionText $newFfmpeg;if([string]::IsNullOrWhiteSpace($version)){throw (T 'ToolMgrFfmpegCannotExecute' 'The downloaded FFmpeg build could not be executed.')}
+        $features=Test-FFmpegFeatures $newFfmpeg;if(-not$features.CpuHevc){throw (T 'ToolMgrFfmpegNoLibx265' 'The downloaded FFmpeg build does not contain libx265.')}
         [void](Test-StagedFfmpegCompatibility -Exe $newFfmpeg)
         New-Item -ItemType Directory -Force -Path $newFolder|Out-Null;Copy-Item (Join-Path $bin '*') $newFolder -Recurse -Force
         $backup=Backup-ToolFolder -Tool 'FFmpeg' -CurrentFolder $target -VersionExe (Join-Path $target 'ffmpeg.exe')
         try{
             Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue;Move-Item -LiteralPath $newFolder -Destination $target
-            if([string]::IsNullOrWhiteSpace((Get-VersionText (Join-Path $target 'ffmpeg.exe')))){throw 'FFmpeg failed verification after activation.'}
+            if([string]::IsNullOrWhiteSpace((Get-VersionText (Join-Path $target 'ffmpeg.exe')))){throw (T 'ToolMgrFfmpegActivationVerifyFailed' 'FFmpeg failed verification after activation.')}
         }catch{
             Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
             if($backup){Copy-Item -LiteralPath $backup -Destination $target -Recurse -Force}
             throw
         }
         Invalidate-EncoderCheck
-        Write-Host (Msg ("Activated FFmpeg {0}." -f $requestedVersion) ("Aktiverade FFmpeg {0}." -f $requestedVersion)) -ForegroundColor Green
+        Write-Host (T 'ToolMgrFfmpegActivated' 'Activated FFmpeg {0}.' @($requestedVersion)) -ForegroundColor Green
         return [pscustomobject]@{FFmpeg=(Join-Path $target 'ffmpeg.exe');FFprobe=(Join-Path $target 'ffprobe.exe');Version=$version}
     }finally{Remove-Item $extract,$newFolder -Recurse -Force -ErrorAction SilentlyContinue}
 }
@@ -433,14 +497,14 @@ function Get-OnlineMkvVersions {
 }
 function Select-OnlineMkvVersion {
     $items=@(Get-OnlineMkvVersions)
-    if($items.Count-eq0){throw (Msg 'Could not retrieve online MKVToolNix releases.' 'Kunde inte hämta MKVToolNix-versioner online.')}
+    if($items.Count-eq0){throw (T 'ToolMgrMkvOnlineUnavailable' 'Could not retrieve online MKVToolNix releases.')}
     $current=Get-ShortToolVersion (Get-VersionText (Join-Path $ToolsRoot 'MKVToolNix\mkvmerge.exe')) 'MKVToolNix'
-    Write-Host '';Write-Host (Msg 'MKVToolNix versions available online:' 'MKVToolNix-versioner tillgängliga online:') -ForegroundColor Cyan
+    Write-Host '';Write-Host (T 'ToolMgrMkvOnlineVersions' 'MKVToolNix versions available online:') -ForegroundColor Cyan
     for($i=0;$i-lt$items.Count;$i++){
-        $suffix=if([string]$items[$i] -eq $current){'  '+(Msg '[installed]' '[installerad]')}else{''}
+        $suffix=if([string]$items[$i] -eq $current){'  '+(T 'ToolMgrInstalledBracket' '[installed]')}else{''}
         Write-Host ('[{0}] {1}{2}' -f ($i+1),$items[$i],$suffix)
     }
-    $answer=Read-Host (Msg 'Choose version number or Enter to cancel' 'Välj versionsnummer eller Enter för att avbryta')
+    $answer=Read-Host (T 'ToolMgrChooseVersionCancel' 'Choose version number or Enter to cancel')
     if([string]::IsNullOrWhiteSpace($answer)){return $null}
     $number=0;if(-not [int]::TryParse($answer,[ref]$number) -or $number -lt 1 -or $number -gt $items.Count){return $null}
     return [string]$items[$number-1]
@@ -454,19 +518,19 @@ function Install-MKVToolNix {
     try{
         New-Item -ItemType Directory -Force -Path $stage|Out-Null
         $p=Start-Process -FilePath $setup -ArgumentList @('/S',('/D='+$stage)) -Wait -PassThru
-        if($p.ExitCode -ne 0){throw "MKVToolNix installer exit code $($p.ExitCode)"}
-        $newExe=Join-Path $stage 'mkvmerge.exe';if(-not(Test-Path $newExe)){throw 'mkvmerge.exe missing after staged installation.'}
-        $versionText=Get-VersionText $newExe;if([string]::IsNullOrWhiteSpace($versionText)){throw 'The staged MKVToolNix build could not be executed.'}
+        if($p.ExitCode -ne 0){throw (T 'ToolMgrMkvInstallerExitCode' 'MKVToolNix installer exit code {0}' @($p.ExitCode))}
+        $newExe=Join-Path $stage 'mkvmerge.exe';if(-not(Test-Path $newExe)){throw (T 'ToolMgrMkvMergeMissing' 'mkvmerge.exe missing after staged installation.')}
+        $versionText=Get-VersionText $newExe;if([string]::IsNullOrWhiteSpace($versionText)){throw (T 'ToolMgrMkvCannotExecute' 'The staged MKVToolNix build could not be executed.')}
         $backup=Backup-ToolFolder -Tool 'MKVToolNix' -CurrentFolder $target -VersionExe (Join-Path $target 'mkvmerge.exe')
         try{
             Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue;Move-Item -LiteralPath $stage -Destination $target
-            if([string]::IsNullOrWhiteSpace((Get-VersionText (Join-Path $target 'mkvmerge.exe')))){throw 'MKVToolNix failed verification after activation.'}
+            if([string]::IsNullOrWhiteSpace((Get-VersionText (Join-Path $target 'mkvmerge.exe')))){throw (T 'ToolMgrMkvActivationVerifyFailed' 'MKVToolNix failed verification after activation.')}
         }catch{
             Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
             if($backup){Copy-Item -LiteralPath $backup -Destination $target -Recurse -Force}
             throw
         }
-        Write-Host (Msg ("Activated MKVToolNix {0}." -f $Version) ("Aktiverade MKVToolNix {0}." -f $Version)) -ForegroundColor Green
+        Write-Host (T 'ToolMgrMkvActivated' 'Activated MKVToolNix {0}.' @($Version)) -ForegroundColor Green
         return (Join-Path $target 'mkvmerge.exe')
     }finally{Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue}
 }
@@ -474,11 +538,11 @@ function Install-MKVToolNix {
 $prefs=Read-Json $PrefPath;if(-not$prefs){$prefs=[pscustomobject]@{}}
 $ffmpeg=[string](Get-P $prefs 'FFmpegPath' '');$ffprobe=[string](Get-P $prefs 'FFprobePath' '');$mkv=[string](Get-P $prefs 'MkvmergePath' '')
 if ($ffmpeg -and -not [IO.Path]::IsPathRooted($ffmpeg)){$ffmpeg=Join-Path $Root $ffmpeg};if ($ffprobe -and -not [IO.Path]::IsPathRooted($ffprobe)){$ffprobe=Join-Path $Root $ffprobe};if ($mkv -and -not [IO.Path]::IsPathRooted($mkv)){$mkv=Join-Path $Root $mkv}
-Write-Host '';Write-Host 'MediaPrep MKV Toolkit - Versions / external tools' -ForegroundColor White;Write-Host ('='*72)
-$gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Name);Write-Host ((Msg 'Detected graphics:' 'Identifierad grafik:')+' '+($gpus-join', '))
-Write-Host ("MediaPrep : {0}" -f (Get-CurrentMediaPrepVersion));Write-Host "FFmpeg    : $(if($ffmpeg){Get-VersionText $ffmpeg}else{'Missing'})";Write-Host "MKVToolNix: $(if($mkv){Get-VersionText $mkv}else{'Missing'})"
+Write-Host '';Write-Host (T 'ToolMgrTitle' 'MediaPrep MKV Toolkit - Versions / external tools') -ForegroundColor White;Write-Host ('='*72)
+$gpus=@(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Name);Write-Host ((T 'ToolMgrDetectedGraphics' 'Detected graphics:')+' '+($gpus-join', '))
+Write-Host ("MediaPrep : {0}" -f (Get-CurrentMediaPrepVersion));Write-Host "FFmpeg    : $(if($ffmpeg){Get-VersionText $ffmpeg}else{(T 'ToolMgrMissing' 'Missing')})";Write-Host "MKVToolNix: $(if($mkv){Get-VersionText $mkv}else{(T 'ToolMgrMissing' 'Missing')})"
 if(Test-Path $ffmpeg){$features=Test-FFmpegFeatures $ffmpeg;Write-Host "CPU HEVC=$($features.CpuHevc)  NVENC=$($features.Nvenc)  QSV=$($features.Qsv)  AMF=$($features.Amf)  CUDA=$($features.Cuda)"}
-Write-Host '';Write-Host (Msg '[P] MediaPrep version, [F] FFmpeg version, [M] MKVToolNix version, [A] latest external tools, [R] rollback, [Q] quit' '[P] MediaPrep-version, [F] FFmpeg-version, [M] MKVToolNix-version, [A] senaste externa verktygen, [R] återställ, [Q] avsluta') -ForegroundColor White
+Write-Host '';Write-Host (T 'ToolMgrMainMenu' '[P] MediaPrep version, [F] FFmpeg version, [M] MKVToolNix version, [A] latest external tools, [R] rollback, [Q] quit') -ForegroundColor White
 $choice=Read-Host '>'
 $updateRequested=$false
 try{
@@ -501,6 +565,6 @@ try{
         $mv=@(Get-OnlineMkvVersions|Select-Object -First 1)
         if($mv.Count-gt0){$result=Install-MKVToolNix -Version ([string]$mv[0]);$prefs|Add-Member -NotePropertyName MkvmergePath -NotePropertyValue 'Tools\MKVToolNix\mkvmerge.exe' -Force}
     }
-    if (-not$updateRequested -and $choice -notmatch '^[QqRrPp]$'){Write-Json $PrefPath $prefs;Write-Host (Msg 'Preferences updated. Previous active versions are kept for local rollback.' 'Inställningarna har uppdaterats. Föregående aktiva versioner sparas för lokal återställning.') -ForegroundColor Green}
-}catch{Write-Host ('ERROR: '+$_.Exception.Message) -ForegroundColor Red}
-if(-not$updateRequested){Write-Host '';Read-Host (Msg 'Press Enter to close' 'Tryck Enter för att stänga')|Out-Null}
+    if (-not$updateRequested -and $choice -notmatch '^[QqRrPp]$'){Write-Json $PrefPath $prefs;Write-Host (T 'ToolMgrPreferencesUpdated' 'Preferences updated. Previous active versions are kept for local rollback.') -ForegroundColor Green}
+}catch{Write-Host (T 'ToolMgrError' 'ERROR: {0}' @($_.Exception.Message)) -ForegroundColor Red}
+if(-not$updateRequested){Write-Host '';Read-Host (T 'ToolMgrPressEnterClose' 'Press Enter to close')|Out-Null}
